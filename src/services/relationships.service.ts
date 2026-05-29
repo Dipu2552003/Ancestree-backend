@@ -59,7 +59,39 @@ export async function createRelationship(
       userId,
     ]
   )
+
+  if (input.rel_type === 'SPOUSE_OF') {
+    await linkSpouseToChildren(input.from_person_id, input.to_person_id, familyId, userId)
+    await linkSpouseToChildren(input.to_person_id, input.from_person_id, familyId, userId)
+  }
+
   return rel
+}
+
+// For each child that existingParentId already parents, create a PARENT_OF
+// edge from newParentId to that child — but only when no such edge exists yet.
+async function linkSpouseToChildren(
+  newParentId: string,
+  existingParentId: string,
+  familyId: string,
+  createdBy: string,
+): Promise<void> {
+  await query(
+    `INSERT INTO relationships (primary_family_id, from_person_id, to_person_id, rel_type, created_by)
+     SELECT $1, $2, r.to_person_id, 'PARENT_OF', $3
+     FROM relationships r
+     WHERE r.from_person_id = $4
+       AND r.rel_type = 'PARENT_OF'
+       AND r.deleted_at IS NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM relationships x
+         WHERE x.from_person_id = $2
+           AND x.to_person_id   = r.to_person_id
+           AND x.rel_type       = 'PARENT_OF'
+           AND x.deleted_at IS NULL
+       )`,
+    [familyId, newParentId, createdBy, existingParentId],
+  )
 }
 
 export async function getRelationshipById(id: string, familyId: string) {

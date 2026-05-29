@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { requireAuth } from '../middleware/auth'
 import { createPersonSchema, updatePersonSchema } from '../schemas/person.schema'
-import { createPerson, getPersonById, updatePerson, deletePerson } from '../services/persons.service'
+import { createPerson, getPersonById, updatePerson, deletePerson, generateInviteToken } from '../services/persons.service'
 
 const router = Router()
 router.use(requireAuth)
@@ -46,6 +46,15 @@ router.patch('/:id', async (req: Request, res: Response) => {
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const result = await deletePerson(req.params.id as string, req.user.userId, req.user.familyId)
+    res.json(result)
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
+  }
+})
+
+router.post('/:id/invite', async (req: Request, res: Response) => {
+  try {
+    const result = await generateInviteToken(req.params.id as string, req.user.userId, req.user.familyId)
     res.json(result)
   } catch (err: any) {
     res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })

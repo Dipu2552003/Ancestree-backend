@@ -7,60 +7,87 @@ dotenv.config()
 
 const migrationsDir = path.join(__dirname, 'migrations')
 
-async function migrate(): Promise<void> {
-  const connectionString = process.env.DATABASE_URL
-  if (!connectionString) {
-    console.error('ERROR: DATABASE_URL environment variable is not set.')
-    console.error('Copy .env.example to .env and fill in your database credentials.')
-    process.exit(1)
-  }
+// Postgres error codes that mean "this object already exists"
+const ALREADY_EXISTS = new Set(['42P07', '42701', '42710'])
 
+export async function runMigrations(connectionString: string): Promise<void> {
   const client = new Client({ connectionString })
+  await client.connect()
 
   try {
-    await client.connect()
-    console.log('✓ Connected to PostgreSQL\n')
-  } catch (err) {
-    console.error('ERROR: Could not connect to PostgreSQL:', err)
-    process.exit(1)
-  }
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        filename TEXT PRIMARY KEY,
+        run_at   TIMESTAMPTZ DEFAULT NOW()
+      )
+    `)
 
-  const files = fs
-    .readdirSync(migrationsDir)
-    .filter(f => f.endsWith('.sql'))
-    .sort()
+    const files = fs
+      .readdirSync(migrationsDir)
+      .filter(f => f.endsWith('.sql'))
+      .sort()
 
-  if (files.length === 0) {
-    console.log('No migration files found.')
-    await client.end()
-    return
-  }
+    const { rows } = await client.query<{ filename: string }>(
+      'SELECT filename FROM schema_migrations'
+    )
+    const already = new Set(rows.map(r => r.filename))
+    const pending = files.filter(f => !already.has(f))
 
-  console.log(`Found ${files.length} migration files. Running inside a transaction...\n`)
-
-  await client.query('BEGIN')
-
-  try {
-    for (const file of files) {
-      const filePath = path.join(migrationsDir, file)
-      const sql = fs.readFileSync(filePath, 'utf8').trim()
-
-      process.stdout.write(`  Running ${file} ... `)
-      await client.query(sql)
-      console.log('✓')
+    if (pending.length === 0) {
+      console.log('✓ Migrations up to date')
+      return
     }
 
-    await client.query('COMMIT')
-    console.log('\n✓ All migrations complete.')
-  } catch (err) {
-    await client.query('ROLLBACK')
-    console.error('\nERROR: Migration failed — rolled back all changes.')
-    console.error(err)
-    await client.end()
-    process.exit(1)
-  }
+    console.log(`Running ${pending.length} pending migration(s)…`)
 
-  await client.end()
+    await client.query('BEGIN')
+    try {
+      for (const file of pending) {
+        const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8').trim()
+        process.stdout.write(`  ${file} … `)
+
+        await client.query('SAVEPOINT pre_migration')
+        try {
+          await client.query(sql)
+          await client.query('RELEASE SAVEPOINT pre_migration')
+          console.log('✓')
+        } catch (err: any) {
+          await client.query('ROLLBACK TO SAVEPOINT pre_migration')
+          await client.query('RELEASE SAVEPOINT pre_migration')
+          if (ALREADY_EXISTS.has(err.code)) {
+            console.log('(already applied, skipped)')
+          } else {
+            throw err
+          }
+        }
+
+        await client.query(
+          'INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING',
+          [file]
+        )
+      }
+      await client.query('COMMIT')
+      console.log('✓ Migrations complete\n')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    }
+  } finally {
+    await client.end()
+  }
 }
 
-migrate()
+// Standalone: npx ts-node database/migrate.ts
+if (require.main === module) {
+  const connectionString = process.env.DATABASE_URL
+  if (!connectionString) {
+    console.error('ERROR: DATABASE_URL is not set.')
+    process.exit(1)
+  }
+  runMigrations(connectionString)
+    .then(() => process.exit(0))
+    .catch(err => {
+      console.error('Migration failed:', err)
+      process.exit(1)
+    })
+}

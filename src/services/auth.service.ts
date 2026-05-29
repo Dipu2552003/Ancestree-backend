@@ -85,7 +85,7 @@ export async function login(input: LoginInput) {
   if (!valid) throw { status: 401, message: 'Invalid email or password' }
 
   const { rows: [member] } = await query<{ family_id: string }>(
-    `SELECT family_id FROM family_members WHERE user_id = $1 LIMIT 1`,
+    `SELECT family_id FROM family_members WHERE user_id = $1 ORDER BY joined_at ASC LIMIT 1`,
     [user.id]
   )
   if (!member) throw { status: 500, message: 'No family found for user' }
@@ -93,6 +93,60 @@ export async function login(input: LoginInput) {
   const token = signToken({ userId: user.id, familyId: member.family_id })
   const { password_hash: _, ...safeUser } = user
   return { token, user: { ...safeUser, family_id: member.family_id } }
+}
+
+export async function signupViaInvite(input: SignupInput & { invite_token: string }) {
+  const existing = await query('SELECT id FROM users WHERE email = $1', [input.email])
+  if ((existing.rowCount ?? 0) > 0) throw { status: 409, message: 'Email already registered' }
+
+  const { rows: [person] } = await query<{
+    id: string; primary_family_id: string; node_state: string
+  }>(
+    `SELECT id, primary_family_id, node_state FROM persons
+     WHERE invite_token = $1 AND deleted_at IS NULL`,
+    [input.invite_token.toUpperCase()]
+  )
+  if (!person) throw { status: 404, message: 'Invalid or expired invite code' }
+  if (person.node_state === 'claimed') throw { status: 409, message: 'This node has already been claimed' }
+
+  const passwordHash = await bcrypt.hash(input.password, 10)
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+
+    const { rows: [user] } = await client.query<{ id: string; email: string; display_name: string }>(
+      `INSERT INTO users (email, display_name, password_hash)
+       VALUES ($1, $2, $3) RETURNING id, email, display_name`,
+      [input.email, input.display_name, passwordHash]
+    )
+
+    await client.query(
+      `UPDATE persons SET node_state = 'claimed', claimed_by = $1, invite_token = NULL, updated_at = NOW()
+       WHERE id = $2`,
+      [user.id, person.id]
+    )
+
+    await client.query(
+      `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, 'member')`,
+      [person.primary_family_id, user.id]
+    )
+
+    await client.query(
+      `UPDATE users SET person_id = $1 WHERE id = $2`,
+      [person.id, user.id]
+    )
+
+    await client.query('COMMIT')
+
+    const token = signToken({ userId: user.id, familyId: person.primary_family_id })
+    return { token, user: { ...user, person_id: person.id, family_id: person.primary_family_id } }
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
 }
 
 export async function getMe(userId: string) {

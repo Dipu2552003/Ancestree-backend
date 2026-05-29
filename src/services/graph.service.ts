@@ -17,37 +17,6 @@ interface DBRelationship {
   rel_type: string; sub_type: string | null; is_active: boolean
 }
 
-function assignGenerations(selfId: string, rels: DBRelationship[]): Map<string, number> {
-  const gens = new Map<string, number>()
-  const queue: Array<{ personId: string; gen: number }> = [{ personId: selfId, gen: 0 }]
-  const visited = new Set<string>()
-
-  while (queue.length > 0) {
-    const { personId, gen } = queue.shift()!
-    if (visited.has(personId)) continue
-    visited.add(personId)
-    gens.set(personId, gen)
-
-    rels
-      .filter(r => r.rel_type === 'PARENT_OF' && r.to_person_id === personId)
-      .forEach(r => !visited.has(r.from_person_id) &&
-        queue.push({ personId: r.from_person_id, gen: gen - 1 }))
-
-    rels
-      .filter(r => r.rel_type === 'PARENT_OF' && r.from_person_id === personId)
-      .forEach(r => !visited.has(r.to_person_id) &&
-        queue.push({ personId: r.to_person_id, gen: gen + 1 }))
-
-    rels
-      .filter(r => r.rel_type === 'SPOUSE_OF' &&
-        (r.from_person_id === personId || r.to_person_id === personId))
-      .map(r => r.from_person_id === personId ? r.to_person_id : r.from_person_id)
-      .forEach(id => !visited.has(id) && queue.push({ personId: id, gen }))
-  }
-
-  return gens
-}
-
 
 function deriveLabel(
   relation: 'parent' | 'child' | 'spouse' | 'sibling',
@@ -156,13 +125,7 @@ export async function fetchFamilyGraph(familyId: string, userId: string) {
   const selfPerson = persons.find(p => p.claimed_by === userId)
   const selfId = selfPerson?.id ?? persons[0]?.id
 
-  if (!selfId) return { nodes: [], edges: [], meta: { totalNodes: 0, generations: 0 } }
-
-  const gens = assignGenerations(selfId, rels)
-
-  for (const p of persons) {
-    if (!gens.has(p.id)) gens.set(p.id, 0)
-  }
+  if (!selfId) return { nodes: [], edges: [], meta: { totalNodes: 0 } }
 
   const relToSelf = computeRelToSelf(selfId, persons, rels)
 
@@ -181,9 +144,8 @@ export async function fetchFamilyGraph(familyId: string, userId: string) {
       nodeState:          p.node_state,
       isSelf:             p.claimed_by === userId,
       isDeceased:         !p.is_alive,
-      generation:         gens.get(p.id) ?? 0,
       relationshipToSelf: relToSelf.get(p.id) ?? '',
-      canEdit:            p.created_by === userId || p.claimed_by === userId,
+      canEdit:            p.claimed_by ? p.claimed_by === userId : p.created_by === userId,
       canDelete:          p.claimed_by !== userId && (isAdmin || p.created_by === userId),
       canInvite:          p.node_state === 'proxy' && p.is_alive,
       nickname:           p.nickname,
@@ -211,14 +173,9 @@ export async function fetchFamilyGraph(familyId: string, userId: string) {
     },
   }))
 
-  const allGens = [...gens.values()]
-  const generationSpan = allGens.length > 0
-    ? Math.max(...allGens) - Math.min(...allGens) + 1
-    : 1
-
   return {
     nodes,
     edges,
-    meta: { totalNodes: nodes.length, generations: generationSpan },
+    meta: { totalNodes: nodes.length },
   }
 }

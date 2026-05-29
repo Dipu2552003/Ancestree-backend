@@ -1,3 +1,4 @@
+import crypto from 'crypto'
 import { query } from '../utils/db'
 import { CreatePersonInput, UpdatePersonInput } from '../schemas/person.schema'
 
@@ -86,6 +87,36 @@ export async function updatePerson(
     [id, ...values]
   )
   return updated
+}
+
+export async function generateInviteToken(id: string, userId: string, familyId: string) {
+  const person = await getPersonById(id, familyId)
+
+  if (person.node_state !== 'proxy') {
+    throw { status: 400, message: 'Only proxy nodes can be invited' }
+  }
+  if (!person.is_alive) {
+    throw { status: 400, message: 'Cannot invite a deceased person' }
+  }
+
+  const { rows: [membership] } = await query<{ role: string }>(
+    `SELECT role FROM family_members WHERE family_id = $1 AND user_id = $2`,
+    [familyId, userId]
+  )
+  const isAdmin = membership?.role === 'admin'
+  const isCreator = person.created_by === userId
+  if (!isAdmin && !isCreator) {
+    throw { status: 403, message: 'Only the person who added this node or a family admin can invite' }
+  }
+
+  const token = crypto.randomBytes(4).toString('hex').toUpperCase()
+
+  await query(
+    `UPDATE persons SET invite_token = $1, node_state = 'invited', invite_sent_at = NOW(), updated_at = NOW() WHERE id = $2`,
+    [token, id]
+  )
+
+  return { invite_token: token }
 }
 
 export async function deletePerson(id: string, userId: string, familyId: string) {
