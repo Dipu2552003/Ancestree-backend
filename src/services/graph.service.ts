@@ -97,7 +97,7 @@ function computeRelToSelf(
   return labels
 }
 
-export async function fetchFamilyGraph(familyId: string, userId: string) {
+export async function fetchFamilyGraph(familyId: string, userId: string, perspectivePersonId?: string) {
   const [{ rows: persons }, { rows: rels }, { rows: [membership] }] = await Promise.all([
     query<DBPerson>(
       `SELECT id, full_name, first_name, gender, birth_year, birth_place, death_year, is_alive,
@@ -122,8 +122,12 @@ export async function fetchFamilyGraph(familyId: string, userId: string) {
 
   const isAdmin = membership?.role === 'admin'
 
-  const selfPerson = persons.find(p => p.claimed_by === userId)
-  const selfId = selfPerson?.id ?? persons[0]?.id
+  let selfId: string | undefined
+  if (perspectivePersonId && persons.some(p => p.id === perspectivePersonId)) {
+    selfId = perspectivePersonId
+  } else {
+    selfId = persons.find(p => p.claimed_by === userId)?.id ?? persons[0]?.id
+  }
 
   if (!selfId) return { nodes: [], edges: [], meta: { totalNodes: 0 } }
 
@@ -142,7 +146,8 @@ export async function fetchFamilyGraph(familyId: string, userId: string) {
       isAlive:            p.is_alive,
       photoUrl:           p.photo_url,
       nodeState:          p.node_state,
-      isSelf:             p.claimed_by === userId,
+      isSelf:             p.id === selfId,
+      isViewerNode:       p.claimed_by === userId,
       isDeceased:         !p.is_alive,
       relationshipToSelf: relToSelf.get(p.id) ?? '',
       canEdit:            p.claimed_by ? p.claimed_by === userId : p.created_by === userId,
