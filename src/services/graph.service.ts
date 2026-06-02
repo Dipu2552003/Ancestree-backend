@@ -2,13 +2,14 @@ import { query } from '../utils/db'
 
 
 interface DBPerson {
-  id: string; full_name: string; first_name: string | null; gender: string | null
+  id: string; full_name: string; first_name: string | null; last_name: string | null
+  name_native: string | null; gender: string | null
   birth_year: number | null; birth_place: string | null
   death_year: number | null; is_alive: boolean
   photo_url: string | null; node_state: string; claimed_by: string | null
-  created_by: string; visibility: string; person_code: string
+  created_by: string; visibility: string; person_code: string; primary_family_id: string
   nickname: string | null; gotra: string | null; native_village: string | null
-  current_city: string | null; current_country: string | null
+  current_city: string | null; current_state: string | null; current_country: string | null
   occupation: string | null; bio: string | null; education: string | null
 }
 
@@ -97,15 +98,30 @@ function computeRelToSelf(
   return labels
 }
 
-export async function fetchFamilyGraph(familyId: string, userId: string, perspectivePersonId?: string) {
+export async function fetchFamilyGraph(familyId: string, userId: string, userFamilyId: string, perspectivePersonId?: string) {
   const [{ rows: persons }, { rows: rels }, { rows: [membership] }] = await Promise.all([
     query<DBPerson>(
-      `SELECT id, full_name, first_name, gender, birth_year, birth_place, death_year, is_alive,
-              photo_url, node_state, claimed_by, created_by, visibility, person_code,
-              nickname, gotra, native_village, current_city, current_country,
-              occupation, bio, education
-       FROM persons
-       WHERE primary_family_id = $1 AND deleted_at IS NULL`,
+      // Fetch this family's own persons PLUS any cross-family persons that are
+      // directly referenced by this family's relationship rows.  This makes
+      // merged canonical nodes (whose primary_family_id belongs to another
+      // family) visible in the graph after a merge.
+      `SELECT DISTINCT p.id, p.full_name, p.first_name, p.last_name, p.name_native,
+              p.gender, p.birth_year, p.birth_place,
+              p.death_year, p.is_alive, p.photo_url, p.node_state, p.claimed_by, p.created_by,
+              p.visibility, p.person_code, p.primary_family_id, p.nickname, p.gotra, p.native_village,
+              p.current_city, p.current_state, p.current_country, p.occupation, p.bio, p.education
+       FROM persons p
+       WHERE p.deleted_at IS NULL
+         AND (
+           p.primary_family_id = $1
+           OR p.id IN (
+             SELECT from_person_id FROM relationships
+             WHERE primary_family_id = $1 AND deleted_at IS NULL
+             UNION
+             SELECT to_person_id FROM relationships
+             WHERE primary_family_id = $1 AND deleted_at IS NULL
+           )
+         )`,
       [familyId]
     ),
     query<DBRelationship>(
@@ -150,15 +166,23 @@ export async function fetchFamilyGraph(familyId: string, userId: string, perspec
       isViewerNode:       p.claimed_by === userId,
       isDeceased:         !p.is_alive,
       relationshipToSelf: relToSelf.get(p.id) ?? '',
-      canEdit:            p.claimed_by ? p.claimed_by === userId : p.created_by === userId,
-      canDelete:          p.claimed_by !== userId && (isAdmin || p.created_by === userId),
-      canInvite:          p.node_state === 'proxy' && p.is_alive,
+      // Any family member can open the panel and add connections to any node.
+      // Only the node's creator or claimer can edit the profile fields.
+      // Cross-family canonical nodes (primary_family_id differs) are fully read-only.
+      canEdit:            p.primary_family_id === userFamilyId,
+      canEditProfile:     p.primary_family_id === userFamilyId && (p.claimed_by ? p.claimed_by === userId : p.created_by === userId),
+      canDelete:          p.primary_family_id === userFamilyId && p.claimed_by !== userId && (isAdmin || p.created_by === userId),
+      canInvite:          p.primary_family_id === userFamilyId && p.node_state === 'proxy' && p.is_alive,
+      firstName:          p.first_name,
+      lastName:           p.last_name,
+      nameNative:         p.name_native,
       nickname:           p.nickname,
       gender:             p.gender,
       birthPlace:         p.birth_place,
       gotra:              p.gotra,
       nativeVillage:      p.native_village,
       currentCity:        p.current_city,
+      currentState:       p.current_state,
       currentCountry:     p.current_country,
       occupation:         p.occupation,
       bio:                p.bio,

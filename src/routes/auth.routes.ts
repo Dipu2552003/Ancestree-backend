@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { signupSchema, loginSchema } from '../schemas/auth.schema'
-import { signup, login, getMe } from '../services/auth.service'
+import { signup, login, getMe, refreshToken } from '../services/auth.service'
 import { requireAuth } from '../middleware/auth'
 
 const router = Router()
@@ -37,6 +37,16 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
   try {
     const user = await getMe(req.user.userId)
     res.json(user)
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
+  }
+})
+
+/** POST /api/auth/refresh-token — re-issue JWT with the correct familyId after a merge */
+router.post('/refresh-token', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const result = await refreshToken(req.user.userId)
+    res.json(result)
   } catch (err: any) {
     res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
   }

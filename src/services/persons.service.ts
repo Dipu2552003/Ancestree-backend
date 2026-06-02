@@ -1,6 +1,7 @@
 import crypto from 'crypto'
 import { query } from '../utils/db'
 import { CreatePersonInput, UpdatePersonInput } from '../schemas/person.schema'
+import { searchDuplicates } from './merge.service'
 
 async function nextPersonCode(familyId: string): Promise<string> {
   const { rows: [fam] } = await query<{ name_prefix: string; person_code_seq: number }>(
@@ -44,7 +45,14 @@ export async function createPerson(
       userId,
     ]
   )
-  return person
+
+  // Search for exact-name duplicates in other families (non-blocking)
+  const potential_matches = await searchDuplicates(input.full_name, familyId).catch(err => {
+    console.error('Duplicate search failed:', err)
+    return []
+  })
+
+  return { ...person, potential_matches }
 }
 
 export async function getPersonById(id: string, familyId: string) {
@@ -68,10 +76,11 @@ export async function updatePerson(
   if (!canEdit) throw { status: 403, message: 'You do not have permission to edit this person' }
 
   const allowed = [
-    'full_name','first_name','last_name','name_native','nickname','gender',
-    'birth_year','birth_place','death_year','is_alive','bio','occupation',
-    'photo_url','visibility','current_city','current_state','current_country',
-    'native_village','gotra','education',
+    'full_name', 'first_name', 'last_name', 'name_native', 'nickname', 'gender',
+    'birth_year', 'birth_place', 'death_year', 'is_alive', 'bio', 'occupation',
+    'photo_url', 'visibility',
+    'current_city', 'current_state', 'current_country',
+    'native_village', 'gotra', 'education',
   ]
 
   const fields = Object.entries(input).filter(
@@ -86,7 +95,17 @@ export async function updatePerson(
     `UPDATE persons SET ${setClauses}, updated_at = NOW() WHERE id = $1 RETURNING *`,
     [id, ...values]
   )
-  return updated
+
+  // When the user explicitly sets a real name, check whether that person
+  // already exists in another family's tree and return the matches so the
+  // frontend can offer a merge request immediately.
+  let potential_matches: import('./merge.service').PotentialMatch[] = []
+  const newName = input.full_name?.trim() ?? ''
+  if (newName && newName.toLowerCase() !== 'unknown') {
+    potential_matches = await searchDuplicates(newName, familyId).catch(() => [])
+  }
+
+  return { ...updated, potential_matches }
 }
 
 export async function generateInviteToken(id: string, userId: string, familyId: string) {

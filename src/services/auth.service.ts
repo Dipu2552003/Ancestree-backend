@@ -2,6 +2,7 @@ import bcrypt from 'bcrypt'
 import pool, { query } from '../utils/db'
 import { signToken } from '../utils/jwt'
 import { SignupInput, LoginInput } from '../schemas/auth.schema'
+import { createNotification } from './notification.service'
 
 function buildNamePrefix(displayName: string): string {
   const lastName = displayName.trim().split(' ').pop() ?? displayName
@@ -61,12 +62,50 @@ export async function signup(input: SignupInput) {
     await client.query('COMMIT')
 
     const token = signToken({ userId: user.id, familyId: family.id })
+
+    // Non-blocking: search for proxy nodes that match this user's name.
+    // If found, send them a claim_suggestion notification so they can
+    // request to join that family directly from the notification bell.
+    sendClaimSuggestions(user.id, input.display_name, family.id).catch(() => {})
+
     return { token, user: { ...user, person_id: person.id, family_id: family.id } }
   } catch (err) {
     await client.query('ROLLBACK')
     throw err
   } finally {
     client.release()
+  }
+}
+
+/** Find proxy/invited nodes whose name matches the new user's display name. */
+async function sendClaimSuggestions(
+  userId:          string,
+  displayName:     string,
+  ownFamilyId:     string,
+): Promise<void> {
+  const { rows } = await query<{
+    id: string; full_name: string; family_name: string
+  }>(
+    `SELECT p.id, p.full_name, f.name AS family_name
+     FROM   persons p
+     JOIN   families f ON f.id = p.primary_family_id
+     WHERE  p.full_name           = $1
+       AND  p.deleted_at         IS NULL
+       AND  p.node_state         IN ('proxy', 'invited')
+       AND  p.primary_family_id  != $2
+       AND  f.deleted_at         IS NULL
+     LIMIT  5`,
+    [displayName, ownFamilyId],
+  )
+
+  for (const match of rows) {
+    await createNotification(
+      userId,
+      'claim_suggestion',
+      `A person named "${match.full_name}" already exists in "${match.family_name}". Is that you? You can request to join that family.`,
+      null,
+      match.id,
+    )
   }
 }
 
@@ -147,6 +186,36 @@ export async function signupViaInvite(input: SignupInput & { invite_token: strin
   } finally {
     client.release()
   }
+}
+
+/**
+ * Re-issue a JWT for an already-authenticated user.
+ * Picks the family that contains the user's active person node.
+ * This is called after a merge so the claimant's token reflects the new family.
+ */
+export async function refreshToken(userId: string): Promise<{ token: string }> {
+  const { rows: [user] } = await query<{ person_id: string | null }>(
+    `SELECT person_id FROM users WHERE id = $1`,
+    [userId],
+  )
+
+  // Prefer the family where person_id lives; fall back to the earliest membership.
+  const { rows: [member] } = await query<{ family_id: string }>(
+    `SELECT fm.family_id
+     FROM   family_members fm
+     LEFT JOIN persons p
+       ON  p.primary_family_id = fm.family_id
+       AND p.id                = $2
+       AND p.deleted_at       IS NULL
+     WHERE  fm.user_id = $1
+     ORDER BY (p.id IS NOT NULL) DESC, fm.joined_at ASC
+     LIMIT 1`,
+    [userId, user?.person_id ?? null],
+  )
+  if (!member) throw { status: 500, message: 'No family found for user' }
+
+  const token = signToken({ userId, familyId: member.family_id })
+  return { token }
 }
 
 export async function getMe(userId: string) {
