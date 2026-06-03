@@ -63,7 +63,7 @@ export async function signup(input: SignupInput) {
 
     const token = signToken({ userId: user.id, familyId: family.id })
 
-    // Non-blocking: search for proxy nodes that match this user's name.
+    // Non-blocking: search for proxy/invited nodes that match this user's name.
     // If found, send them a claim_suggestion notification so they can
     // request to join that family directly from the notification bell.
     sendClaimSuggestions(user.id, input.display_name, family.id).catch(() => {})

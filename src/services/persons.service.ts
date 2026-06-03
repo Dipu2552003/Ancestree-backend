@@ -1,5 +1,5 @@
 import crypto from 'crypto'
-import { query } from '../utils/db'
+import pool, { query } from '../utils/db'
 import { CreatePersonInput, UpdatePersonInput } from '../schemas/person.schema'
 import { searchDuplicates } from './merge.service'
 import { createPossibleMatchNotification } from './notification.service'
@@ -185,11 +185,48 @@ export async function deletePerson(id: string, userId: string, familyId: string)
     throw { status: 403, message: 'You cannot delete your own node' }
   }
 
-  await query(
-    `UPDATE relationships SET deleted_at = NOW()
-     WHERE (from_person_id = $1 OR to_person_id = $1) AND deleted_at IS NULL`,
-    [id]
-  )
-  await query(`UPDATE persons SET deleted_at = NOW() WHERE id = $1`, [id])
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+
+    // Remove edges that attach this person to their parents' family unit:
+    // 1. PARENT_OF edges pointing TO this person (Keshav→Ishu, Shilpa→Ishu)
+    await client.query(
+      `UPDATE relationships SET deleted_at = NOW()
+       WHERE to_person_id = $1 AND rel_type = 'PARENT_OF' AND deleted_at IS NULL`,
+      [id],
+    )
+
+    // 2. SIBLING_OF edges (derived from the shared-parent relationship)
+    await client.query(
+      `UPDATE relationships SET deleted_at = NOW()
+       WHERE (from_person_id = $1 OR to_person_id = $1)
+         AND rel_type = 'SIBLING_OF' AND deleted_at IS NULL`,
+      [id],
+    )
+
+    // Check whether any edges remain (spouse, own children, etc.)
+    const { rows: [{ remaining }] } = await client.query<{ remaining: string }>(
+      `SELECT COUNT(*) AS remaining FROM relationships
+       WHERE (from_person_id = $1 OR to_person_id = $1) AND deleted_at IS NULL`,
+      [id],
+    )
+    const hasOwnFamily = parseInt(remaining) > 0
+
+    // Only hard-delete the node if it is unclaimed AND has no remaining connections.
+    // Claimed nodes are never deleted — the account owner still exists.
+    // Proxy/invited nodes with a spouse or children stay as their own family unit.
+    if (!hasOwnFamily && person.node_state !== 'claimed') {
+      await client.query(`UPDATE persons SET deleted_at = NOW() WHERE id = $1`, [id])
+    }
+
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
+
   return { success: true }
 }

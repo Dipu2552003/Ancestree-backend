@@ -65,6 +65,10 @@ export async function createRelationship(
     await linkSpouseToChildren(input.to_person_id, input.from_person_id, familyId, userId)
   }
 
+  if (input.rel_type === 'SIBLING_OF') {
+    await linkSiblingGroup(input.from_person_id, input.to_person_id, familyId, userId)
+  }
+
   return rel
 }
 
@@ -92,6 +96,52 @@ async function linkSpouseToChildren(
        )`,
     [familyId, newParentId, createdBy, existingParentId],
   )
+}
+
+// When SIBLING_OF(A, B) is created, merge A's sibling group with B's sibling group.
+// Every member of A's group must become a sibling of every member of B's group.
+// Example: A already has siblings [X, Y], B has siblings [P]:
+//   new pairs needed → A-P, X-B, X-P, Y-B, Y-P  (A-B was just inserted)
+async function linkSiblingGroup(
+  personA: string,
+  personB: string,
+  familyId: string,
+  createdBy: string,
+): Promise<void> {
+  const sibsOf = async (id: string, exclude: string) => {
+    const { rows } = await query<{ id: string }>(
+      `SELECT CASE WHEN from_person_id = $1 THEN to_person_id ELSE from_person_id END AS id
+       FROM   relationships
+       WHERE  (from_person_id = $1 OR to_person_id = $1)
+         AND  rel_type          = 'SIBLING_OF'
+         AND  primary_family_id = $2
+         AND  deleted_at        IS NULL
+         AND  CASE WHEN from_person_id = $1 THEN to_person_id ELSE from_person_id END != $3`,
+      [id, familyId, exclude],
+    )
+    return rows.map(r => r.id)
+  }
+
+  const groupA = [personA, ...(await sibsOf(personA, personB))]
+  const groupB = [personB, ...(await sibsOf(personB, personA))]
+
+  for (const x of groupA) {
+    for (const y of groupB) {
+      if (x === personA && y === personB) continue  // already inserted
+      await query(
+        `INSERT INTO relationships (primary_family_id, from_person_id, to_person_id, rel_type, created_by)
+         SELECT $1, $2, $3, 'SIBLING_OF', $4
+         WHERE NOT EXISTS (
+           SELECT 1 FROM relationships
+           WHERE  ((from_person_id = $2 AND to_person_id = $3)
+                OR (from_person_id = $3 AND to_person_id = $2))
+             AND  rel_type   = 'SIBLING_OF'
+             AND  deleted_at IS NULL
+         )`,
+        [familyId, x, y, createdBy],
+      )
+    }
+  }
 }
 
 export async function getRelationshipById(id: string, familyId: string) {
