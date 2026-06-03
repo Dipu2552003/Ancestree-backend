@@ -2,6 +2,7 @@ import crypto from 'crypto'
 import { query } from '../utils/db'
 import { CreatePersonInput, UpdatePersonInput } from '../schemas/person.schema'
 import { searchDuplicates } from './merge.service'
+import { createPossibleMatchNotification } from './notification.service'
 
 async function nextPersonCode(familyId: string): Promise<string> {
   const { rows: [fam] } = await query<{ name_prefix: string; person_code_seq: number }>(
@@ -46,11 +47,35 @@ export async function createPerson(
     ]
   )
 
-  // Search for exact-name duplicates in other families (non-blocking)
-  const potential_matches = await searchDuplicates(input.full_name, familyId).catch(err => {
+  const potential_matches = await searchDuplicates({
+    fullName:      input.full_name,
+    firstName:     input.first_name ?? null,
+    lastName:      input.last_name ?? null,
+    birthYear:     input.birth_year ?? null,
+    nativeVillage: input.native_village ?? null,
+    gotra:         input.gotra ?? null,
+    gender:        input.gender ?? null,
+  }, familyId).catch(err => {
     console.error('Duplicate search failed:', err)
     return []
   })
+
+  // Persist each match as a notification so the user can act on it later
+  await Promise.allSettled(potential_matches.map(m =>
+    createPossibleMatchNotification(userId, person.id, {
+      new_person_name:           input.full_name,
+      new_person_birth_year:     input.birth_year ?? null,
+      new_person_native_village: input.native_village ?? null,
+      new_person_gotra:          input.gotra ?? null,
+      new_person_photo_url:      input.photo_url ?? null,
+      canonical_person_id:       m.id,
+      canonical_person_name:     m.full_name,
+      canonical_family_id:       m.family_id,
+      canonical_family_name:     m.family_name,
+      match_score:               m.match_score,
+      matched_fields:            m.matched_fields,
+    }).catch(err => console.error('possible_match notification failed:', err))
+  ))
 
   return { ...person, potential_matches }
 }
@@ -72,8 +97,9 @@ export async function updatePerson(
 ) {
   const person = await getPersonById(id, familyId)
 
-  const canEdit = person.created_by === userId || person.claimed_by === userId
-  if (!canEdit) throw { status: 403, message: 'You do not have permission to edit this person' }
+  if (person.node_state === 'claimed' && person.claimed_by !== userId) {
+    throw { status: 403, message: 'Only the profile owner can edit a claimed profile' }
+  }
 
   const allowed = [
     'full_name', 'first_name', 'last_name', 'name_native', 'nickname', 'gender',
@@ -102,7 +128,31 @@ export async function updatePerson(
   let potential_matches: import('./merge.service').PotentialMatch[] = []
   const newName = input.full_name?.trim() ?? ''
   if (newName && newName.toLowerCase() !== 'unknown') {
-    potential_matches = await searchDuplicates(newName, familyId).catch(() => [])
+    potential_matches = await searchDuplicates({
+      fullName:      newName,
+      firstName:     updated.first_name ?? null,
+      lastName:      updated.last_name ?? null,
+      birthYear:     updated.birth_year ?? null,
+      nativeVillage: updated.native_village ?? null,
+      gotra:         updated.gotra ?? null,
+      gender:        updated.gender ?? null,
+    }, familyId).catch(() => [])
+
+    await Promise.allSettled(potential_matches.map(m =>
+      createPossibleMatchNotification(userId, updated.id, {
+        new_person_name:           newName,
+        new_person_birth_year:     updated.birth_year ?? null,
+        new_person_native_village: updated.native_village ?? null,
+        new_person_gotra:          updated.gotra ?? null,
+        new_person_photo_url:      updated.photo_url ?? null,
+        canonical_person_id:       m.id,
+        canonical_person_name:     m.full_name,
+        canonical_family_id:       m.family_id,
+        canonical_family_name:     m.family_name,
+        match_score:               m.match_score,
+        matched_fields:            m.matched_fields,
+      }).catch(err => console.error('possible_match notification failed:', err))
+    ))
   }
 
   return { ...updated, potential_matches }
@@ -116,16 +166,6 @@ export async function generateInviteToken(id: string, userId: string, familyId: 
   }
   if (!person.is_alive) {
     throw { status: 400, message: 'Cannot invite a deceased person' }
-  }
-
-  const { rows: [membership] } = await query<{ role: string }>(
-    `SELECT role FROM family_members WHERE family_id = $1 AND user_id = $2`,
-    [familyId, userId]
-  )
-  const isAdmin = membership?.role === 'admin'
-  const isCreator = person.created_by === userId
-  if (!isAdmin && !isCreator) {
-    throw { status: 403, message: 'Only the person who added this node or a family admin can invite' }
   }
 
   const token = crypto.randomBytes(4).toString('hex').toUpperCase()
@@ -143,17 +183,6 @@ export async function deletePerson(id: string, userId: string, familyId: string)
 
   if (person.claimed_by === userId) {
     throw { status: 403, message: 'You cannot delete your own node' }
-  }
-
-  const { rows: [membership] } = await query<{ role: string }>(
-    `SELECT role FROM family_members WHERE family_id = $1 AND user_id = $2`,
-    [familyId, userId]
-  )
-  const isAdmin = membership?.role === 'admin'
-  const isCreator = person.created_by === userId
-
-  if (!isAdmin && !isCreator) {
-    throw { status: 403, message: 'Only the person who added this node or a family admin can delete it' }
   }
 
   await query(

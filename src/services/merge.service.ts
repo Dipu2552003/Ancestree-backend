@@ -25,44 +25,153 @@ export interface SentMergeRequest {
   merged_at:             string | null
 }
 
+export interface SearchInput {
+  fullName:       string
+  firstName?:     string | null
+  lastName?:      string | null
+  birthYear?:     number | null
+  nativeVillage?: string | null
+  gotra?:         string | null
+  gender?:        string | null
+}
+
 export interface PotentialMatch {
   id:             string
   full_name:      string
   birth_year:     number | null
   native_village: string | null
+  gotra:          string | null
+  gender:         string | null
+  photo_url:      string | null
+  family_name:    string
+  family_id:      string
+  member_count:   number
+  match_score:    number
+  matched_fields: string[]
+}
+
+interface DBCandidate {
+  id:             string
+  full_name:      string
+  first_name:     string | null
+  last_name:      string | null
+  birth_year:     number | null
+  native_village: string | null
+  gotra:          string | null
+  gender:         string | null
+  photo_url:      string | null
   family_name:    string
   family_id:      string
   member_count:   number
 }
 
+function norm(s: string | null | undefined) {
+  return (s ?? '').trim().toLowerCase()
+}
+
+function scoreCandidate(c: DBCandidate, input: SearchInput): { score: number; matched: string[] } {
+  let score = 0
+  const matched: string[] = []
+
+  if (norm(c.full_name) === norm(input.fullName) && norm(input.fullName)) {
+    score += 50
+    matched.push('name')
+  } else {
+    if (norm(input.firstName) && norm(c.first_name) && norm(c.first_name) === norm(input.firstName)) {
+      score += 20
+      matched.push('first name')
+    }
+    if (norm(input.lastName) && norm(c.last_name) && norm(c.last_name) === norm(input.lastName)) {
+      score += 15
+      matched.push('last name')
+    }
+  }
+
+  if (input.birthYear && c.birth_year) {
+    const diff = Math.abs(input.birthYear - c.birth_year)
+    if (diff === 0)      { score += 30; matched.push('birth year') }
+    else if (diff <= 2)  { score += 15; matched.push('approx. birth year') }
+  }
+
+  if (norm(input.nativeVillage) && norm(c.native_village) && norm(c.native_village) === norm(input.nativeVillage)) {
+    score += 20
+    matched.push('village')
+  }
+
+  if (norm(input.gotra) && norm(c.gotra) && norm(c.gotra) === norm(input.gotra)) {
+    score += 15
+    matched.push('gotra')
+  }
+
+  if (input.gender && c.gender && input.gender === c.gender) score += 5
+
+  return { score, matched }
+}
+
 // ── Operation 1 ───────────────────────────────────────────────────────────────
 
 /**
- * Exact-name search across all families except the caller's.
- * Called immediately after a person is created.
+ * Multi-field scored search across all families except the caller's.
+ * Matches on name, birth year, village, gotra — returns scored + ranked results.
  */
 export async function searchDuplicates(
-  fullName: string,
+  input: SearchInput,
   callerFamilyId: string,
 ): Promise<PotentialMatch[]> {
-  const { rows } = await query<PotentialMatch>(
-    `SELECT p.id,
-            p.full_name,
-            p.birth_year,
-            p.native_village,
-            f.name        AS family_name,
-            f.id          AS family_id,
+  // Build OR conditions dynamically based on available fields
+  const orConditions: string[] = []
+  const params: (string | number)[] = [callerFamilyId]
+  let idx = 2
+
+  orConditions.push(`LOWER(p.full_name) = LOWER($${idx++})`)
+  params.push(input.fullName)
+
+  if (input.firstName?.trim()) {
+    orConditions.push(`(p.first_name IS NOT NULL AND LOWER(p.first_name) = LOWER($${idx++}))`)
+    params.push(input.firstName.trim())
+  }
+
+  if (input.lastName?.trim()) {
+    orConditions.push(`(p.last_name IS NOT NULL AND LOWER(p.last_name) = LOWER($${idx++}))`)
+    params.push(input.lastName.trim())
+  }
+
+  const { rows } = await query<DBCandidate>(
+    `SELECT p.id, p.full_name, p.first_name, p.last_name,
+            p.birth_year, p.native_village, p.gotra, p.gender, p.photo_url,
+            f.name AS family_name, f.id AS family_id,
             (SELECT COUNT(*) FROM family_members fm WHERE fm.family_id = f.id)::int AS member_count
      FROM   persons p
      JOIN   families f ON f.id = p.primary_family_id
-     WHERE  p.full_name           = $1
-       AND  p.deleted_at         IS NULL
-       AND  p.primary_family_id  != $2
-       AND  f.deleted_at         IS NULL
-     LIMIT  10`,
-    [fullName, callerFamilyId],
+     WHERE  p.deleted_at        IS NULL
+       AND  p.primary_family_id != $1
+       AND  f.deleted_at        IS NULL
+       AND  (${orConditions.join(' OR ')})
+     LIMIT  30`,
+    params,
   )
+
   return rows
+    .map(c => {
+      const { score, matched } = scoreCandidate(c, input)
+      return {
+        id:             c.id,
+        full_name:      c.full_name,
+        birth_year:     c.birth_year,
+        native_village: c.native_village,
+        gotra:          c.gotra,
+        gender:         c.gender,
+        photo_url:      c.photo_url,
+        family_name:    c.family_name,
+        family_id:      c.family_id,
+        member_count:   c.member_count,
+        match_score:    score,
+        matched_fields: matched,
+      }
+    })
+    .filter(m => m.match_score >= 20)
+    .sort((a, b) => b.match_score - a.match_score)
+    .slice(0, 5)
 }
 
 // ── Operation 1b — List sent requests ─────────────────────────────────────────
@@ -106,6 +215,16 @@ export async function createMergeRequest(
   initiatedBy:       string,
   initiatorFamilyId: string,
 ): Promise<{ merge_record_id: string }> {
+  // Verify the person being proposed belongs to the initiator's own family
+  const { rows: [personCheck] } = await query(
+    `SELECT id FROM persons
+     WHERE  id = $1 AND primary_family_id = $2 AND deleted_at IS NULL`,
+    [newPersonId, initiatorFamilyId],
+  )
+  if (!personCheck) {
+    throw { status: 403, message: 'You can only request merges for persons in your own family' }
+  }
+
   // Prevent duplicate pending requests for the same pair
   const { rows: existing } = await query(
     `SELECT id FROM merge_records
@@ -255,6 +374,10 @@ export async function acceptMerge(
     //   Case 2  New children  + existing children →  SIBLING_OF between them
     //   Case 2b New children  + new children      →  SIBLING_OF between them
     //   Case 3  New spouses   + existing children →  new spouse PARENT_OF child
+    //   Case 4  New siblings  + existing parents  →  parent PARENT_OF new sibling
+    //   Case 5  New siblings  + existing siblings →  SIBLING_OF between them
+    //   Case 5b New siblings  + new siblings      →  SIBLING_OF between them
+    //   Case 6  New parents   + existing siblings →  new parent PARENT_OF existing sibling
 
     const { rows: newChildRows } = await client.query<{ child_id: string }>(
       `SELECT to_person_id AS child_id
@@ -280,6 +403,31 @@ export async function acceptMerge(
       [canonicalId, mergedFamilyId],
     )
     const newSpouseIds = newSpouseRows.map(r => r.spouse_id)
+
+    const { rows: newSiblingRows } = await client.query<{ sibling_id: string }>(
+      `SELECT CASE
+         WHEN from_person_id = $1 THEN to_person_id
+         ELSE from_person_id
+       END AS sibling_id
+       FROM   relationships
+       WHERE  (from_person_id = $1 OR to_person_id = $1)
+         AND  rel_type          = 'SIBLING_OF'
+         AND  primary_family_id = $2
+         AND  deleted_at        IS NULL`,
+      [canonicalId, mergedFamilyId],
+    )
+    const newSiblingIds = newSiblingRows.map(r => r.sibling_id)
+
+    const { rows: newParentRows } = await client.query<{ parent_id: string }>(
+      `SELECT from_person_id AS parent_id
+       FROM   relationships
+       WHERE  to_person_id      = $1
+         AND  rel_type          = 'PARENT_OF'
+         AND  primary_family_id = $2
+         AND  deleted_at        IS NULL`,
+      [canonicalId, mergedFamilyId],
+    )
+    const newParentIds = newParentRows.map(r => r.parent_id)
 
     // Capture all persons in the merged family excluding:
     //   • the canonical node itself (stays in its own family)
@@ -378,6 +526,20 @@ export async function acceptMerge(
       [canonFamilyId, mergedFamilyId],
     )
 
+    // Remove all members from the merged family so future JWT refreshes and
+    // logins no longer route users to this now-empty family.
+    await client.query(
+      `DELETE FROM family_members WHERE family_id = $1`,
+      [mergedFamilyId],
+    )
+
+    // Soft-delete the merged family itself so it is excluded from all queries
+    // that filter by deleted_at IS NULL (graph fetch, family lookups, etc.).
+    await client.query(
+      `UPDATE families SET deleted_at = NOW() WHERE id = $1`,
+      [mergedFamilyId],
+    )
+
     // Step 5f: Infer cascade relationships that must exist after the merge but don't.
     //
     // After the redirect in Step 3, the canonical node has all the relationships
@@ -409,9 +571,9 @@ export async function acceptMerge(
       )
     }
 
-    if (newChildIds.length > 0 || newSpouseIds.length > 0) {
+    if (newChildIds.length > 0 || newSpouseIds.length > 0 || newSiblingIds.length > 0 || newParentIds.length > 0) {
       // After step 5d all relationships are in canonFamilyId; use the pre-captured
-      // lists (newChildIds, newSpouseIds) to split "old" from "new".
+      // lists (newChildIds, newSpouseIds, newSiblingIds) to split "old" from "new".
 
       // Existing children = all current children of canonical MINUS the new ones
       const { rows: existingChildRows } = await client.query<{ child_id: string }>(
@@ -475,6 +637,109 @@ export async function acceptMerge(
       for (const newSpouseId of newSpouseIds) {
         for (const existingChildId of existingChildIds) {
           await safeInsertRel(newSpouseId, existingChildId, 'PARENT_OF')
+        }
+      }
+
+      // Cases 4 / 5 / 5b  — sibling-side inference
+      //
+      // When the merged family adds a new sibling (e.g. Keshav added Mahendra as
+      // brother → merge accepted), the canonical's existing parents and siblings
+      // must be wired to the new sibling too.
+      //
+      //   Case 4:  new sibling + canonical's existing parents
+      //            → parent PARENT_OF new sibling
+      //            (Keshav should inherit Devichand as father)
+      //
+      //   Case 5:  new sibling + canonical's existing siblings
+      //            → existing sibling SIBLING_OF new sibling
+      //
+      //   Case 5b: multiple new siblings from the same merged family
+      //            → SIBLING_OF between each other
+      if (newSiblingIds.length > 0) {
+        // Existing parents of canonical (already in canonFamilyId after step 5d)
+        const { rows: existingParentRows } = await client.query<{ parent_id: string }>(
+          `SELECT from_person_id AS parent_id
+           FROM   relationships
+           WHERE  to_person_id      = $1
+             AND  rel_type          = 'PARENT_OF'
+             AND  primary_family_id = $2
+             AND  deleted_at        IS NULL`,
+          [canonicalId, canonFamilyId],
+        )
+        const existingParentIds = existingParentRows.map(r => r.parent_id)
+
+        // Case 4
+        for (const parentId of existingParentIds) {
+          for (const sibId of newSiblingIds) {
+            await safeInsertRel(parentId, sibId, 'PARENT_OF')
+          }
+        }
+
+        // Existing siblings of canonical MINUS the newly-arrived ones
+        const { rows: existingSiblingRows } = await client.query<{ sibling_id: string }>(
+          `SELECT CASE
+             WHEN from_person_id = $1 THEN to_person_id
+             ELSE from_person_id
+           END AS sibling_id
+           FROM   relationships
+           WHERE  (from_person_id = $1 OR to_person_id = $1)
+             AND  rel_type          = 'SIBLING_OF'
+             AND  primary_family_id = $2
+             AND  deleted_at        IS NULL
+             AND  CASE WHEN from_person_id = $1 THEN to_person_id
+                       ELSE from_person_id END != ALL($3::uuid[])`,
+          [canonicalId, canonFamilyId, newSiblingIds],
+        )
+        const existingSiblingIds = existingSiblingRows.map(r => r.sibling_id)
+
+        // Case 5
+        for (const existingSibId of existingSiblingIds) {
+          for (const newSibId of newSiblingIds) {
+            await safeInsertRel(existingSibId, newSibId, 'SIBLING_OF')
+          }
+        }
+
+        // Case 5b
+        for (let i = 0; i < newSiblingIds.length; i++) {
+          for (let j = i + 1; j < newSiblingIds.length; j++) {
+            await safeInsertRel(newSiblingIds[i], newSiblingIds[j], 'SIBLING_OF')
+          }
+        }
+      }
+
+      // Case 6: New parents become parents of canonical's existing siblings.
+      //
+      // Example: Family B has Sita who added Mahendra as her son.  Family A has
+      // Mahendra with sibling Keshav.  After merge Sita should also be Keshav's
+      // parent — but the relationship is never created otherwise.
+      //
+      // Note: newParent → newSibling is already in Family B's relationships and
+      // gets transferred in step 5d, so only existingSiblings need wiring here.
+      if (newParentIds.length > 0) {
+        // Existing siblings = all current siblings of canonical MINUS new ones
+        const { rows: existingSibForParentRows } = await client.query<{ sibling_id: string }>(
+          `SELECT CASE
+             WHEN from_person_id = $1 THEN to_person_id
+             ELSE from_person_id
+           END AS sibling_id
+           FROM   relationships
+           WHERE  (from_person_id = $1 OR to_person_id = $1)
+             AND  rel_type          = 'SIBLING_OF'
+             AND  primary_family_id = $2
+             AND  deleted_at        IS NULL
+             ${newSiblingIds.length > 0
+               ? 'AND CASE WHEN from_person_id = $1 THEN to_person_id ELSE from_person_id END != ALL($3::uuid[])'
+               : ''}`,
+          newSiblingIds.length > 0
+            ? [canonicalId, canonFamilyId, newSiblingIds]
+            : [canonicalId, canonFamilyId],
+        )
+        const existingSibForParentIds = existingSibForParentRows.map(r => r.sibling_id)
+
+        for (const newParentId of newParentIds) {
+          for (const sibId of existingSibForParentIds) {
+            await safeInsertRel(newParentId, sibId, 'PARENT_OF')
+          }
         }
       }
     }
@@ -555,17 +820,79 @@ export async function acceptMerge(
 
 // ── Operation 4 ───────────────────────────────────────────────────────────────
 
+// ── Operation 1c — Get merge request details ──────────────────────────────────
+
+export interface MergeDetails {
+  id:                    string
+  status:                'proposed' | 'confirmed' | 'rejected' | 'reversed'
+  canonical_person_id:   string
+  canonical_person_name: string
+  canonical_family_id:   string
+  canonical_family_name: string
+  merged_person_id:      string
+  merged_person_name:    string
+  merged_family_id:      string
+  merged_family_name:    string
+  created_at:            string
+}
+
+export async function getMergeById(mergeId: string): Promise<MergeDetails> {
+  const { rows: [record] } = await query<MergeDetails>(
+    `SELECT
+       mr.id, mr.status, mr.created_at,
+       cp.id           AS canonical_person_id,
+       cp.full_name    AS canonical_person_name,
+       cp.primary_family_id AS canonical_family_id,
+       cf.name         AS canonical_family_name,
+       mp.id           AS merged_person_id,
+       mp.full_name    AS merged_person_name,
+       mp.primary_family_id AS merged_family_id,
+       mf.name         AS merged_family_name
+     FROM  merge_records mr
+     JOIN  persons  cp ON cp.id = mr.canonical_person_id
+     JOIN  families cf ON cf.id = cp.primary_family_id
+     JOIN  persons  mp ON mp.id = mr.merged_person_id
+     JOIN  families mf ON mf.id = mp.primary_family_id
+     WHERE mr.id = $1`,
+    [mergeId],
+  )
+  if (!record) throw { status: 404, message: 'Merge request not found' }
+  return record
+}
+
+// ── Operation 4 ───────────────────────────────────────────────────────────────
+
 export async function rejectMerge(
   mergeRecordId: string,
   rejectedBy:    string,
 ): Promise<void> {
-  const { rows: [record] } = await query<{ initiated_by: string; merged_person_id: string }>(
-    `UPDATE merge_records SET status = 'rejected'
-     WHERE id = $1 AND status = 'proposed'
-     RETURNING initiated_by, merged_person_id`,
+  // Fetch record first so we can check membership before mutating
+  const { rows: [record] } = await query<{
+    initiated_by: string; merged_person_id: string; canonical_person_id: string
+  }>(
+    `SELECT initiated_by, merged_person_id, canonical_person_id
+     FROM merge_records WHERE id = $1 AND status = 'proposed'`,
     [mergeRecordId],
   )
   if (!record) throw { status: 404, message: 'Merge request not found or already resolved' }
+
+  // Verify rejector is a member of the canonical family
+  const { rows: [canonPerson] } = await query<{ primary_family_id: string }>(
+    `SELECT primary_family_id FROM persons WHERE id = $1`,
+    [record.canonical_person_id],
+  )
+  const { rows: [membership] } = await query(
+    `SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2`,
+    [canonPerson.primary_family_id, rejectedBy],
+  )
+  if (!membership) throw { status: 403, message: 'You are not a member of the target family' }
+
+  const { rowCount } = await query(
+    `UPDATE merge_records SET status = 'rejected'
+     WHERE id = $1 AND status = 'proposed'`,
+    [mergeRecordId],
+  )
+  if (!rowCount) throw { status: 409, message: 'Merge request was already resolved' }
 
   // Fetch person name for notification
   const { rows: [person] } = await query<{ full_name: string }>(

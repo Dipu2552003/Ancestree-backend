@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { requireAuth } from '../middleware/auth'
-import { createMergeRequest, acceptMerge, rejectMerge, listSentMergeRequests } from '../services/merge.service'
+import { createMergeRequest, acceptMerge, rejectMerge, listSentMergeRequests, getMergeById } from '../services/merge.service'
 
 const router = Router()
 router.use(requireAuth)
@@ -10,6 +10,16 @@ router.get('/sent', async (req: Request, res: Response) => {
   try {
     const requests = await listSentMergeRequests(req.user.userId)
     res.json({ requests })
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
+  }
+})
+
+/** GET /api/merges/:id — details of a specific merge request (must be after /sent) */
+router.get('/:id', async (req: Request, res: Response) => {
+  try {
+    const details = await getMergeById(req.params.id as string)
+    res.json(details)
   } catch (err: any) {
     res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
   }

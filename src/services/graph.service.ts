@@ -170,8 +170,8 @@ export async function fetchFamilyGraph(familyId: string, userId: string, userFam
       // Only the node's creator or claimer can edit the profile fields.
       // Cross-family canonical nodes (primary_family_id differs) are fully read-only.
       canEdit:            p.primary_family_id === userFamilyId,
-      canEditProfile:     p.primary_family_id === userFamilyId && (p.claimed_by ? p.claimed_by === userId : p.created_by === userId),
-      canDelete:          p.primary_family_id === userFamilyId && p.claimed_by !== userId && (isAdmin || p.created_by === userId),
+      canEditProfile:     p.primary_family_id === userFamilyId && (p.node_state === 'claimed' ? p.claimed_by === userId : true),
+      canDelete:          p.primary_family_id === userFamilyId && p.claimed_by !== userId,
       canInvite:          p.primary_family_id === userFamilyId && p.node_state === 'proxy' && p.is_alive,
       firstName:          p.first_name,
       lastName:           p.last_name,

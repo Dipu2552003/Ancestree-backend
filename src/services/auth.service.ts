@@ -123,9 +123,20 @@ export async function login(input: LoginInput) {
   const valid = await bcrypt.compare(input.password, user.password_hash)
   if (!valid) throw { status: 401, message: 'Invalid email or password' }
 
+  // Prefer the family where person_id lives (same logic as refreshToken).
+  // Also exclude soft-deleted families so a merged-away family is never returned.
   const { rows: [member] } = await query<{ family_id: string }>(
-    `SELECT family_id FROM family_members WHERE user_id = $1 ORDER BY joined_at ASC LIMIT 1`,
-    [user.id]
+    `SELECT fm.family_id
+     FROM   family_members fm
+     JOIN   families f ON f.id = fm.family_id AND f.deleted_at IS NULL
+     LEFT JOIN persons p
+       ON  p.primary_family_id = fm.family_id
+       AND p.id                = $2
+       AND p.deleted_at       IS NULL
+     WHERE  fm.user_id = $1
+     ORDER BY (p.id IS NOT NULL) DESC, fm.joined_at ASC
+     LIMIT 1`,
+    [user.id, user.person_id],
   )
   if (!member) throw { status: 500, message: 'No family found for user' }
 
@@ -200,9 +211,12 @@ export async function refreshToken(userId: string): Promise<{ token: string }> {
   )
 
   // Prefer the family where person_id lives; fall back to the earliest membership.
+  // Exclude soft-deleted families so users without a person_id (e.g. admin-only)
+  // are also routed away from a merged-away family after a merge.
   const { rows: [member] } = await query<{ family_id: string }>(
     `SELECT fm.family_id
      FROM   family_members fm
+     JOIN   families f ON f.id = fm.family_id AND f.deleted_at IS NULL
      LEFT JOIN persons p
        ON  p.primary_family_id = fm.family_id
        AND p.id                = $2
