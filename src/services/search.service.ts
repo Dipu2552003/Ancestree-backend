@@ -1,6 +1,7 @@
 import { query } from '../utils/db'
+import { logger } from '../utils/logger'
 
-export async function searchPersons(q: string, _familyId: string) {
+export async function searchPersons(q: string, familyId: string) {
   if (!q || q.trim().length < 2) {
     return { results: [] }
   }
@@ -19,6 +20,7 @@ export async function searchPersons(q: string, _familyId: string) {
        ON f.id = p.primary_family_id
       AND f.deleted_at IS NULL
      WHERE p.deleted_at IS NULL
+       AND p.primary_family_id != $3
        AND (
             p.full_name ILIKE $1
             OR similarity(p.full_name, $2) > 0.2
@@ -31,8 +33,9 @@ export async function searchPersons(q: string, _familyId: string) {
        similarity(p.full_name, $2) DESC,
        length(p.full_name)
      LIMIT 10`,
-    [`${term}%`, term],
+    [`${term}%`, term, familyId],
   )
 
+  logger.debug({ q: term, results: rows.length }, 'search')
   return { results: rows }
 }

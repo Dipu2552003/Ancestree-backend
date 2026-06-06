@@ -1,4 +1,5 @@
 import pool, { query } from '../utils/db'
+import { logger } from '../utils/logger'
 
 export async function claimByToken(token: string, userId: string) {
   const { rows: [person] } = await query<{
@@ -10,8 +11,14 @@ export async function claimByToken(token: string, userId: string) {
     [token.toUpperCase()]
   )
 
-  if (!person) throw { status: 404, message: 'Invalid or expired invite code' }
-  if (person.node_state === 'claimed') throw { status: 409, message: 'This node has already been claimed' }
+  if (!person) {
+    logger.warn({ token }, 'claimByToken: invalid token')
+    throw { status: 404, message: 'Invalid or expired invite code' }
+  }
+  if (person.node_state === 'claimed') {
+    logger.warn({ personId: person.id, userId }, 'claimByToken: already claimed')
+    throw { status: 409, message: 'This node has already been claimed' }
+  }
   if (person.claimed_by === userId) throw { status: 409, message: 'You already own this node' }
 
   const { rows: [alreadyMember] } = await query(
@@ -38,6 +45,7 @@ export async function claimByToken(token: string, userId: string) {
     }
 
     await client.query('COMMIT')
+    logger.info({ personId: person.id, userId, familyId: person.primary_family_id }, 'invite claimed')
     return { success: true, person_id: person.id, family_id: person.primary_family_id, full_name: person.full_name }
   } catch (err) {
     await client.query('ROLLBACK')

@@ -1,8 +1,10 @@
-import express from 'express'
+import express, { type Request, type Response, type NextFunction } from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import dotenv from 'dotenv'
+import pinoHttp from 'pino-http'
 import { testConnection } from './utils/db'
+import { logger } from './utils/logger'
 import { runMigrations } from '../database/migrate'
 import authRoutes          from './routes/auth.routes'
 import personsRoutes       from './routes/persons.routes'
@@ -31,6 +33,17 @@ app.use(cors({
 }))
 app.use(express.json())
 
+app.use(pinoHttp({
+  logger,
+  customLogLevel: (_req, res, err) => {
+    if (err || res.statusCode >= 500) return 'error'
+    if (res.statusCode >= 400) return 'warn'
+    return 'info'
+  },
+  redact: ['req.headers.authorization'],
+  autoLogging: { ignore: (req) => req.url === '/health' },
+}))
+
 app.get('/health', async (_req, res) => {
   try {
     await testConnection()
@@ -49,19 +62,23 @@ app.use('/api/invite',        inviteRoutes)
 app.use('/api/merges',        mergesRoutes)
 app.use('/api/notifications', notificationsRoutes)
 
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  logger.error({ err }, 'unhandled error')
+  res.status(500).json({ error: 'Internal server error' })
+})
+
 async function start() {
   try {
     await testConnection()
-    console.log('✓ Connected to PostgreSQL')
+    logger.info('connected to PostgreSQL')
     const dbUrl = process.env.DATABASE_URL
     if (!dbUrl) throw new Error('DATABASE_URL environment variable is not set')
     await runMigrations(dbUrl)
     app.listen(PORT, () => {
-      console.log(`✓ Server running on http://localhost:${PORT}`)
-      console.log(`  Routes: /api/auth  /api/persons  /api/relationships  /api/graph  /api/search  /api/invite  /api/merges  /api/notifications`)
+      logger.info({ port: PORT }, 'server started')
     })
   } catch (err) {
-    console.error('✗ Could not connect to PostgreSQL:', err)
+    logger.error({ err }, 'failed to start server')
     process.exit(1)
   }
 }

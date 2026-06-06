@@ -12,6 +12,7 @@ import pool, { query } from '../utils/db'
 import { createNotification, notifyFamily } from './notification.service'
 import { recomputeFamilyHead } from './familyHead.service'
 import { detectMergeConflicts, type MergeConflict, type ConflictContext } from './mergeConflicts.service'
+import { logger } from '../utils/logger'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -275,6 +276,7 @@ export async function createMergeRequest(
     [initiatedBy],
   )
 
+  logger.info({ mergeRecordId, newPersonId, canonicalPersonId, initiatedBy, initiatorFamilyId }, 'merge request created')
   return { merge_record_id: mergeRecordId }
 }
 
@@ -293,6 +295,7 @@ export async function acceptMerge(
   let canonFamilyId = ''
   let mergedFamilyId = ''
 
+  logger.info({ mergeRecordId, acceptedBy }, 'merge accept: start')
   try {
     await client.query('BEGIN')
 
@@ -554,6 +557,8 @@ export async function acceptMerge(
     //   but Joshana→Yash (Case 1) and Yash↔Dipkul (Case 2) are still missing.
 
     // Helper — safe insert that skips if an equivalent active edge already exists.
+    // For PARENT_OF: also skips if the child already has 2+ parents to prevent
+    // biologically impossible triple-parent situations from cascade inference.
     const safeInsertRel = async (
       from: string, to: string, relType: string,
     ) => {
@@ -566,7 +571,14 @@ export async function acceptMerge(
                    OR (from_person_id = $2 AND to_person_id = $1 AND $3 = 'SIBLING_OF'))
              AND  rel_type   = $3
              AND  deleted_at IS NULL
-         )`,
+         )
+         AND ($3 != 'PARENT_OF' OR (
+           SELECT COUNT(*) FROM relationships
+           WHERE  to_person_id      = $2
+             AND  rel_type          = 'PARENT_OF'
+             AND  primary_family_id = $4
+             AND  deleted_at        IS NULL
+         ) < 2)`,
         [from, to, relType, canonFamilyId, acceptedBy],
       )
     }
@@ -656,15 +668,21 @@ export async function acceptMerge(
       //   Case 5b: multiple new siblings from the same merged family
       //            → SIBLING_OF between each other
       if (newSiblingIds.length > 0) {
-        // Existing parents of canonical (already in canonFamilyId after step 5d)
+        // Existing parents of canonical — after step 5d all rels are in canonFamilyId,
+        // so we must exclude newParentIds (which came from the merged family) to avoid
+        // treating newly-arrived parents as pre-existing ones and wiring them to new
+        // siblings that already have their own parents.
         const { rows: existingParentRows } = await client.query<{ parent_id: string }>(
           `SELECT from_person_id AS parent_id
            FROM   relationships
            WHERE  to_person_id      = $1
              AND  rel_type          = 'PARENT_OF'
              AND  primary_family_id = $2
-             AND  deleted_at        IS NULL`,
-          [canonicalId, canonFamilyId],
+             AND  deleted_at        IS NULL
+             ${newParentIds.length > 0 ? 'AND from_person_id != ALL($3::uuid[])' : ''}`,
+          newParentIds.length > 0
+            ? [canonicalId, canonFamilyId, newParentIds]
+            : [canonicalId, canonFamilyId],
         )
         const existingParentIds = existingParentRows.map(r => r.parent_id)
 
@@ -744,6 +762,30 @@ export async function acceptMerge(
       }
     }
 
+    // Safety net: ensure the acceptor and the claimant (if any) each still have
+    // at least one active family membership after all the deletions above.
+    // This catches edge-cases where a user's only family_members row was removed
+    // during the merge flow (e.g. they were in both families and the bulk DELETE
+    // ran before the INSERT was flushed in an unexpected order).
+    const usersToCheck = Array.from(new Set([acceptedBy, ...(claimant ? [claimant] : [])]))
+    for (const uid of usersToCheck) {
+      const { rows: memberships } = await client.query(
+        `SELECT 1 FROM family_members fm
+         JOIN families f ON f.id = fm.family_id AND f.deleted_at IS NULL
+         WHERE fm.user_id = $1
+         LIMIT 1`,
+        [uid],
+      )
+      if (memberships.length === 0) {
+        await client.query(
+          `INSERT INTO family_members (family_id, user_id, role)
+           VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING`,
+          [canonFamilyId, uid],
+        )
+        logger.warn({ uid, canonFamilyId }, 'merge safety net: restored missing family membership')
+      }
+    }
+
     // Step 6: Update merge_records
     await client.query(
       `UPDATE merge_records
@@ -805,10 +847,11 @@ export async function acceptMerge(
       orphanedUserId: orphanedUserId,
     }
     const conflicts = await detectMergeConflicts(conflictCtx).catch(err => {
-      console.error('Conflict detection failed (non-fatal):', err)
+      logger.error({ err }, 'conflict detection failed (non-fatal)')
       return [] as MergeConflict[]
     })
 
+    logger.info({ mergeRecordId, canonicalId, canonFamilyId, mergedFamilyId, acceptedBy, conflicts: conflicts.length }, 'merge accepted')
     return { canonical_person_id: canonicalId, conflicts }
   } catch (err) {
     await client.query('ROLLBACK')
@@ -892,7 +935,10 @@ export async function rejectMerge(
      WHERE id = $1 AND status = 'proposed'`,
     [mergeRecordId],
   )
-  if (!rowCount) throw { status: 409, message: 'Merge request was already resolved' }
+  if (!rowCount) {
+    logger.warn({ mergeRecordId, rejectedBy }, 'rejectMerge: already resolved')
+    throw { status: 409, message: 'Merge request was already resolved' }
+  }
 
   // Fetch person name for notification
   const { rows: [person] } = await query<{ full_name: string }>(
@@ -906,4 +952,5 @@ export async function rejectMerge(
     `Your merge request for "${person?.full_name ?? 'Unknown'}" was declined.`,
     mergeRecordId,
   )
+  logger.info({ mergeRecordId, rejectedBy }, 'merge rejected')
 }

@@ -1,8 +1,9 @@
 import bcrypt from 'bcrypt'
 import pool, { query } from '../utils/db'
 import { signToken } from '../utils/jwt'
-import { SignupInput, LoginInput } from '../schemas/auth.schema'
+import { SignupInput, LoginInput, CheckEmailInput } from '../schemas/auth.schema'
 import { createNotification } from './notification.service'
+import { logger } from '../utils/logger'
 
 function buildNamePrefix(displayName: string): string {
   const lastName = displayName.trim().split(' ').pop() ?? displayName
@@ -19,6 +20,7 @@ async function uniquePrefix(base: string): Promise<string> {
 export async function signup(input: SignupInput) {
   const existing = await query('SELECT id FROM users WHERE email = $1', [input.email])
   if ((existing.rowCount ?? 0) > 0) {
+    logger.warn({ email: input.email }, 'signup: email already registered')
     throw { status: 409, message: 'Email already registered' }
   }
 
@@ -63,11 +65,9 @@ export async function signup(input: SignupInput) {
 
     const token = signToken({ userId: user.id, familyId: family.id })
 
-    // Non-blocking: search for proxy/invited nodes that match this user's name.
-    // If found, send them a claim_suggestion notification so they can
-    // request to join that family directly from the notification bell.
     sendClaimSuggestions(user.id, input.display_name, family.id).catch(() => {})
 
+    logger.info({ userId: user.id, email: user.email, familyId: family.id }, 'signup')
     return { token, user: { ...user, person_id: person.id, family_id: family.id } }
   } catch (err) {
     await client.query('ROLLBACK')
@@ -118,10 +118,16 @@ export async function login(input: LoginInput) {
     [input.email]
   )
   const user = rows[0]
-  if (!user) throw { status: 401, message: 'Invalid email or password' }
+  if (!user) {
+    logger.warn({ email: input.email }, 'login: unknown email')
+    throw { status: 401, message: 'Invalid email or password' }
+  }
 
   const valid = await bcrypt.compare(input.password, user.password_hash)
-  if (!valid) throw { status: 401, message: 'Invalid email or password' }
+  if (!valid) {
+    logger.warn({ email: input.email, userId: user.id }, 'login: wrong password')
+    throw { status: 401, message: 'Invalid email or password' }
+  }
 
   // Prefer the family where person_id lives (same logic as refreshToken).
   // Also exclude soft-deleted families so a merged-away family is never returned.
@@ -141,6 +147,7 @@ export async function login(input: LoginInput) {
   if (!member) throw { status: 500, message: 'No family found for user' }
 
   const token = signToken({ userId: user.id, familyId: member.family_id })
+  logger.info({ userId: user.id, familyId: member.family_id }, 'login')
   const { password_hash: _, ...safeUser } = user
   return { token, user: { ...safeUser, family_id: member.family_id } }
 }
@@ -189,6 +196,7 @@ export async function signupViaInvite(input: SignupInput & { invite_token: strin
 
     await client.query('COMMIT')
 
+    logger.info({ userId: user.id, personId: person.id, familyId: person.primary_family_id }, 'signup via invite')
     const token = signToken({ userId: user.id, familyId: person.primary_family_id })
     return { token, user: { ...user, person_id: person.id, family_id: person.primary_family_id } }
   } catch (err) {
@@ -230,6 +238,11 @@ export async function refreshToken(userId: string): Promise<{ token: string }> {
 
   const token = signToken({ userId, familyId: member.family_id })
   return { token }
+}
+
+export async function checkEmail(input: CheckEmailInput): Promise<{ exists: boolean }> {
+  const { rowCount } = await query('SELECT 1 FROM users WHERE email = $1', [input.email])
+  return { exists: (rowCount ?? 0) > 0 }
 }
 
 export async function getMe(userId: string) {

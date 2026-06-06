@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
-import { signupSchema, loginSchema } from '../schemas/auth.schema'
-import { signup, login, getMe, refreshToken } from '../services/auth.service'
+import { signupSchema, loginSchema, checkEmailSchema } from '../schemas/auth.schema'
+import { signup, login, getMe, refreshToken, checkEmail } from '../services/auth.service'
 import { requireAuth } from '../middleware/auth'
 
 const router = Router()
@@ -14,6 +14,20 @@ router.post('/signup', async (req: Request, res: Response) => {
   try {
     const result = await signup(parsed.data)
     res.status(201).json(result)
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
+  }
+})
+
+router.post('/check-email', async (req: Request, res: Response) => {
+  const parsed = checkEmailSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0].message })
+    return
+  }
+  try {
+    const result = await checkEmail(parsed.data)
+    res.json(result)
   } catch (err: any) {
     res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
   }

@@ -1,5 +1,6 @@
 import { Pool, QueryResult, QueryResultRow } from 'pg'
 import dotenv from 'dotenv'
+import { logger } from './logger'
 
 dotenv.config()
 
@@ -11,7 +12,7 @@ const pool = new Pool({
 })
 
 pool.on('error', (err) => {
-  console.error('Unexpected PostgreSQL pool error:', err)
+  logger.error({ err }, 'unexpected PostgreSQL pool error')
   process.exit(1)
 })
 
@@ -21,9 +22,9 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
 ): Promise<QueryResult<T>> {
   const start = Date.now()
   const result = await pool.query<T>(text, params)
-  if (process.env.NODE_ENV === 'development') {
-    console.log(`[db] ${text.slice(0, 80)} — ${Date.now() - start}ms`)
-  }
+  const ms = Date.now() - start
+  logger.debug({ sql: text.slice(0, 80), ms, rows: result.rowCount }, 'db query')
+  if (ms > 500) logger.warn({ sql: text.slice(0, 120), ms }, 'slow query')
   return result
 }
 

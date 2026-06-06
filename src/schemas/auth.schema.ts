@@ -11,5 +11,10 @@ export const loginSchema = z.object({
   password: z.string().min(1),
 })
 
+export const checkEmailSchema = z.object({
+  email: z.string().email(),
+})
+
 export type SignupInput = z.infer<typeof signupSchema>
 export type LoginInput = z.infer<typeof loginSchema>
+export type CheckEmailInput = z.infer<typeof checkEmailSchema>

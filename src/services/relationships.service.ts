@@ -1,5 +1,6 @@
 import { query } from '../utils/db'
 import { CreateRelationshipInput } from '../schemas/relationship.schema'
+import { logger } from '../utils/logger'
 
 async function hasCycle(parentId: string, childId: string): Promise<boolean> {
   const { rows } = await query<{ exists: boolean }>(
@@ -29,7 +30,10 @@ export async function createRelationship(
      WHERE id = ANY($1::uuid[]) AND primary_family_id = $2 AND deleted_at IS NULL`,
     [[input.from_person_id, input.to_person_id], familyId]
   )
-  if (persons.length < 2) throw { status: 404, message: 'One or both persons not found in your family' }
+  if (persons.length < 2) {
+    logger.warn({ from: input.from_person_id, to: input.to_person_id, familyId }, 'createRelationship: persons not found')
+    throw { status: 404, message: 'One or both persons not found in your family' }
+  }
 
   const { rowCount: dup } = await query(
     `SELECT id FROM relationships
@@ -37,11 +41,17 @@ export async function createRelationship(
        AND rel_type = $3 AND deleted_at IS NULL`,
     [input.from_person_id, input.to_person_id, input.rel_type]
   )
-  if (dup && dup > 0) throw { status: 409, message: 'This relationship already exists' }
+  if (dup && dup > 0) {
+    logger.warn({ from: input.from_person_id, to: input.to_person_id, type: input.rel_type }, 'createRelationship: duplicate')
+    throw { status: 409, message: 'This relationship already exists' }
+  }
 
   if (input.rel_type === 'PARENT_OF') {
     const cycle = await hasCycle(input.from_person_id, input.to_person_id)
-    if (cycle) throw { status: 400, message: 'This relationship would create a cycle' }
+    if (cycle) {
+      logger.warn({ from: input.from_person_id, to: input.to_person_id }, 'createRelationship: cycle detected')
+      throw { status: 400, message: 'This relationship would create a cycle' }
+    }
   }
 
   const { rows: [rel] } = await query(
@@ -69,6 +79,7 @@ export async function createRelationship(
     await linkSiblingGroup(input.from_person_id, input.to_person_id, familyId, userId)
   }
 
+  logger.info({ relId: rel.id, from: input.from_person_id, to: input.to_person_id, type: input.rel_type, familyId }, 'relationship created')
   return rel
 }
 
@@ -157,5 +168,6 @@ export async function getRelationshipById(id: string, familyId: string) {
 export async function deleteRelationship(id: string, familyId: string) {
   await getRelationshipById(id, familyId)
   await query(`UPDATE relationships SET deleted_at = NOW() WHERE id = $1`, [id])
+  logger.info({ relId: id, familyId }, 'relationship deleted')
   return { success: true }
 }

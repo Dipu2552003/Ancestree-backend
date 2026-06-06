@@ -1,16 +1,21 @@
 import { query } from '../utils/db'
+import { logger } from '../utils/logger'
 
 
 interface DBPerson {
-  id: string; full_name: string; first_name: string | null; last_name: string | null
-  name_native: string | null; gender: string | null
-  birth_year: number | null; birth_place: string | null
-  death_year: number | null; is_alive: boolean
+  id: string; full_name: string; first_name: string | null; middle_name: string | null; last_name: string | null
+  name_native: string | null; nickname: string | null; gender: string | null
+  gotra: string | null; religion: string | null
+  birth_date: string | null; birth_year: number | null; birth_place: string | null
+  death_date: string | null; death_year: number | null; death_place: string | null; is_alive: boolean
+  phone: string | null; whatsapp: string | null; email: string | null
+  current_address: string | null; current_city: string | null; current_state: string | null
+  current_country: string | null; current_pincode: string | null
+  native_village: string | null; native_tehsil: string | null; native_district: string | null
+  native_state: string | null; native_country: string | null
+  occupation: string | null; occupation_detail: string | null; education: string | null; bio: string | null
   photo_url: string | null; node_state: string; claimed_by: string | null
   created_by: string; visibility: string; person_code: string; primary_family_id: string
-  nickname: string | null; gotra: string | null; native_village: string | null
-  current_city: string | null; current_state: string | null; current_country: string | null
-  occupation: string | null; bio: string | null; education: string | null
 }
 
 interface DBRelationship {
@@ -105,11 +110,17 @@ export async function fetchFamilyGraph(familyId: string, userId: string, userFam
       // directly referenced by this family's relationship rows.  This makes
       // merged canonical nodes (whose primary_family_id belongs to another
       // family) visible in the graph after a merge.
-      `SELECT DISTINCT p.id, p.full_name, p.first_name, p.last_name, p.name_native,
-              p.gender, p.birth_year, p.birth_place,
-              p.death_year, p.is_alive, p.photo_url, p.node_state, p.claimed_by, p.created_by,
-              p.visibility, p.person_code, p.primary_family_id, p.nickname, p.gotra, p.native_village,
-              p.current_city, p.current_state, p.current_country, p.occupation, p.bio, p.education
+      `SELECT DISTINCT
+              p.id, p.person_code, p.primary_family_id, p.node_state, p.claimed_by, p.created_by, p.visibility,
+              p.full_name, p.first_name, p.middle_name, p.last_name, p.name_native, p.nickname,
+              p.gender, p.gotra, p.religion,
+              p.birth_date, p.birth_year, p.birth_place,
+              p.is_alive, p.death_date, p.death_year, p.death_place,
+              p.phone, p.whatsapp, p.email,
+              p.current_address, p.current_city, p.current_state, p.current_country, p.current_pincode,
+              p.native_village, p.native_tehsil, p.native_district, p.native_state, p.native_country,
+              p.occupation, p.occupation_detail, p.education, p.bio,
+              p.photo_url
        FROM persons p
        WHERE p.deleted_at IS NULL
          AND (
@@ -145,7 +156,10 @@ export async function fetchFamilyGraph(familyId: string, userId: string, userFam
     selfId = persons.find(p => p.claimed_by === userId)?.id ?? persons[0]?.id
   }
 
-  if (!selfId) return { nodes: [], edges: [], meta: { totalNodes: 0 } }
+  if (!selfId) {
+    logger.warn({ familyId, userId }, 'fetchFamilyGraph: no persons found')
+    return { nodes: [], edges: [], meta: { totalNodes: 0 } }
+  }
 
   const relToSelf = computeRelToSelf(selfId, persons, rels)
 
@@ -174,19 +188,34 @@ export async function fetchFamilyGraph(familyId: string, userId: string, userFam
       canDelete:          p.primary_family_id === userFamilyId && p.claimed_by !== userId,
       canInvite:          p.primary_family_id === userFamilyId && p.node_state === 'proxy' && p.is_alive,
       firstName:          p.first_name,
+      middleName:         p.middle_name,
       lastName:           p.last_name,
       nameNative:         p.name_native,
       nickname:           p.nickname,
       gender:             p.gender,
-      birthPlace:         p.birth_place,
       gotra:              p.gotra,
-      nativeVillage:      p.native_village,
+      religion:           p.religion,
+      birthDate:          p.birth_date,
+      birthPlace:         p.birth_place,
+      deathDate:          p.death_date,
+      deathPlace:         p.death_place,
+      phone:              p.phone,
+      whatsapp:           p.whatsapp,
+      email:              p.email,
+      currentAddress:     p.current_address,
       currentCity:        p.current_city,
       currentState:       p.current_state,
       currentCountry:     p.current_country,
+      currentPincode:     p.current_pincode,
+      nativeVillage:      p.native_village,
+      nativeTehsil:       p.native_tehsil,
+      nativeDistrict:     p.native_district,
+      nativeState:        p.native_state,
+      nativeCountry:      p.native_country,
       occupation:         p.occupation,
-      bio:                p.bio,
+      occupationDetail:   p.occupation_detail,
       education:          p.education,
+      bio:                p.bio,
     },
   }))
 
@@ -202,6 +231,7 @@ export async function fetchFamilyGraph(familyId: string, userId: string, userFam
     },
   }))
 
+  logger.debug({ familyId, userId, nodes: nodes.length, edges: edges.length }, 'graph fetched')
   return {
     nodes,
     edges,

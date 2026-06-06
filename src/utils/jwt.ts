@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken'
+import { logger } from './logger'
 
 export interface JwtPayload {
   userId: string
@@ -7,7 +8,7 @@ export interface JwtPayload {
 
 const rawSecret = process.env.JWT_SECRET
 if (!rawSecret) {
-  console.error('FATAL: JWT_SECRET environment variable is not set')
+  logger.fatal('JWT_SECRET environment variable is not set')
   process.exit(1)
 }
 const SECRET = rawSecret

@@ -3,6 +3,7 @@ import pool, { query } from '../utils/db'
 import { CreatePersonInput, UpdatePersonInput } from '../schemas/person.schema'
 import { searchDuplicates } from './merge.service'
 import { createPossibleMatchNotification } from './notification.service'
+import { logger } from '../utils/logger'
 
 async function nextPersonCode(familyId: string): Promise<string> {
   const { rows: [fam] } = await query<{ name_prefix: string; person_code_seq: number }>(
@@ -47,6 +48,8 @@ export async function createPerson(
     ]
   )
 
+  logger.info({ personId: person.id, personCode, familyId, name: input.full_name }, 'person created')
+
   const potential_matches = await searchDuplicates({
     fullName:      input.full_name,
     firstName:     input.first_name ?? null,
@@ -56,7 +59,7 @@ export async function createPerson(
     gotra:         input.gotra ?? null,
     gender:        input.gender ?? null,
   }, familyId).catch(err => {
-    console.error('Duplicate search failed:', err)
+    logger.error({ err }, 'duplicate search failed')
     return []
   })
 
@@ -74,7 +77,7 @@ export async function createPerson(
       canonical_family_name:     m.family_name,
       match_score:               m.match_score,
       matched_fields:            m.matched_fields,
-    }).catch(err => console.error('possible_match notification failed:', err))
+    }).catch(err => logger.error({ err }, 'possible_match notification failed'))
   ))
 
   return { ...person, potential_matches }
@@ -98,6 +101,7 @@ export async function updatePerson(
   const person = await getPersonById(id, familyId)
 
   if (person.node_state === 'claimed' && person.claimed_by !== userId) {
+    logger.warn({ personId: id, userId, claimedBy: person.claimed_by }, 'updatePerson: forbidden')
     throw { status: 403, message: 'Only the profile owner can edit a claimed profile' }
   }
 
@@ -155,6 +159,7 @@ export async function updatePerson(
     ))
   }
 
+  logger.info({ personId: id, userId, fields: fields.map(([k]) => k) }, 'person updated')
   return { ...updated, potential_matches }
 }
 
@@ -175,6 +180,7 @@ export async function generateInviteToken(id: string, userId: string, familyId: 
     [token, id]
   )
 
+  logger.info({ personId: id, userId, familyId }, 'invite token generated')
   return { invite_token: token }
 }
 
@@ -182,6 +188,7 @@ export async function deletePerson(id: string, userId: string, familyId: string)
   const person = await getPersonById(id, familyId)
 
   if (person.claimed_by === userId) {
+    logger.warn({ personId: id, userId }, 'deletePerson: tried to delete own node')
     throw { status: 403, message: 'You cannot delete your own node' }
   }
 
@@ -205,7 +212,22 @@ export async function deletePerson(id: string, userId: string, familyId: string)
       [id],
     )
 
-    // Check whether any edges remain (spouse, own children, etc.)
+    // 3. SPOUSE_OF edges
+    await client.query(
+      `UPDATE relationships SET deleted_at = NOW()
+       WHERE (from_person_id = $1 OR to_person_id = $1)
+         AND rel_type = 'SPOUSE_OF' AND deleted_at IS NULL`,
+      [id],
+    )
+
+    // 4. PARENT_OF edges FROM this person (this person → their children)
+    await client.query(
+      `UPDATE relationships SET deleted_at = NOW()
+       WHERE from_person_id = $1 AND rel_type = 'PARENT_OF' AND deleted_at IS NULL`,
+      [id],
+    )
+
+    // Check whether any edges remain (anything unexpected)
     const { rows: [{ remaining }] } = await client.query<{ remaining: string }>(
       `SELECT COUNT(*) AS remaining FROM relationships
        WHERE (from_person_id = $1 OR to_person_id = $1) AND deleted_at IS NULL`,
@@ -216,11 +238,15 @@ export async function deletePerson(id: string, userId: string, familyId: string)
     // Only hard-delete the node if it is unclaimed AND has no remaining connections.
     // Claimed nodes are never deleted — the account owner still exists.
     // Proxy/invited nodes with a spouse or children stay as their own family unit.
-    if (!hasOwnFamily && person.node_state !== 'claimed') {
+    const softDeleted = !hasOwnFamily && person.node_state !== 'claimed'
+    if (softDeleted) {
       await client.query(`UPDATE persons SET deleted_at = NOW() WHERE id = $1`, [id])
+    } else if (!softDeleted) {
+      logger.warn({ personId: id, userId, hasOwnFamily, nodeState: person.node_state }, 'person node kept — relationships removed only')
     }
 
     await client.query('COMMIT')
+    logger.info({ personId: id, userId, softDeleted }, 'person deleted')
   } catch (err) {
     await client.query('ROLLBACK')
     throw err
