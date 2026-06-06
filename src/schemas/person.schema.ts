@@ -21,6 +21,8 @@ export const createPersonSchema = z.object({
   native_village:   z.string().max(100).nullish(),
   gotra:            z.string().max(100).nullish(),
   education:        z.string().max(200).nullish(),
+  bio_mother_name:  z.string().max(200).nullish(),
+  bio_father_name:  z.string().max(200).nullish(),
 })
 
 export const updatePersonSchema = createPersonSchema.partial()

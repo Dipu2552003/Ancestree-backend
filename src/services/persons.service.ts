@@ -111,6 +111,7 @@ export async function updatePerson(
     'photo_url', 'visibility',
     'current_city', 'current_state', 'current_country',
     'native_village', 'gotra', 'education',
+    'bio_mother_name', 'bio_father_name',
   ]
 
   const fields = Object.entries(input).filter(
