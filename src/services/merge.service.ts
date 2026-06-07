@@ -267,14 +267,30 @@ export async function createMergeRequest(
     `"${initiatorFamily.name}" believes their "${newPerson.full_name}" ` +
     `is the same person as your "${canonPerson.full_name}". Accept or Reject?`
 
-  // Notify all members of the canonical family (excluding initiator)
-  await notifyFamily(
-    canonPerson.primary_family_id,
-    'merge_request_received',
-    message,
-    mergeRecordId,
-    [initiatedBy],
+  // If the canonical node is claimed, only the claimant is the decision-maker.
+  // Otherwise fan out to family members; include the initiator on same-family
+  // merges so the only real user in their own tree still gets the notification.
+  const { rows: [claimant] } = await query<{ id: string }>(
+    `SELECT id FROM users WHERE person_id = $1 LIMIT 1`,
+    [canonicalPersonId],
   )
+  if (claimant) {
+    await createNotification(
+      claimant.id,
+      'merge_request_received',
+      message,
+      mergeRecordId,
+    )
+  } else {
+    const isSameFamily = canonPerson.primary_family_id === initiatorFamilyId
+    await notifyFamily(
+      canonPerson.primary_family_id,
+      'merge_request_received',
+      message,
+      mergeRecordId,
+      isSameFamily ? [] : [initiatedBy],
+    )
+  }
 
   logger.info({ mergeRecordId, newPersonId, canonicalPersonId, initiatedBy, initiatorFamilyId }, 'merge request created')
   return { merge_record_id: mergeRecordId }
@@ -330,11 +346,33 @@ export async function acceptMerge(
     canonFamilyId  = canonPerson.primary_family_id
     mergedFamilyId = mergedPerson.primary_family_id
 
-    const { rows: [membership] } = await client.query(
-      `SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2`,
-      [canonFamilyId, acceptedBy],
+    // If the canonical node is claimed, only the claimant can accept.
+    // Otherwise any member of the canonical family can accept.
+    const { rows: [canonClaimant] } = await client.query<{ id: string }>(
+      `SELECT id FROM users WHERE person_id = $1 LIMIT 1`,
+      [canonicalId],
     )
-    if (!membership) throw { status: 403, message: 'You are not a member of the target family' }
+    if (canonClaimant) {
+      if (canonClaimant.id !== acceptedBy) {
+        throw { status: 403, message: 'Only the claimed owner of this node can accept this merge' }
+      }
+    } else {
+      const { rows: [membership] } = await client.query(
+        `SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2`,
+        [canonFamilyId, acceptedBy],
+      )
+      if (!membership) throw { status: 403, message: 'You are not a member of the target family' }
+    }
+
+    // Capture every user who was a member of either family BEFORE mutations.
+    // The safety net at the end of the transaction restores any that lost
+    // their last active membership (defence-in-depth for any future regression
+    // in the family-teardown steps).
+    const { rows: preMergeMembers } = await client.query<{ user_id: string }>(
+      `SELECT DISTINCT user_id FROM family_members WHERE family_id = ANY($1::uuid[])`,
+      [[canonFamilyId, mergedFamilyId]],
+    )
+    const preMergeUserIds = preMergeMembers.map(r => r.user_id)
 
     // Step 3: Redirect all relationships from deleted node → canonical node
     await client.query(
@@ -480,11 +518,14 @@ export async function acceptMerge(
          ON CONFLICT DO NOTHING`,
         [canonFamilyId, claimant],
       )
-      // Leave the now-empty merged family so the next JWT issued picks the right one
-      await client.query(
-        `DELETE FROM family_members WHERE family_id = $1 AND user_id = $2`,
-        [mergedFamilyId, claimant],
-      )
+      // Leave the now-empty merged family so the next JWT issued picks the right one.
+      // Skip in same-family merges — both ids point at the user's only family.
+      if (canonFamilyId !== mergedFamilyId) {
+        await client.query(
+          `DELETE FROM family_members WHERE family_id = $1 AND user_id = $2`,
+          [mergedFamilyId, claimant],
+        )
+      }
       // Point user record at the surviving node
       await client.query(
         `UPDATE users SET person_id = $1 WHERE id = $2`,
@@ -492,56 +533,62 @@ export async function acceptMerge(
       )
     }
 
-    // Step 5c: Transfer all surviving persons from the merged family into the
-    // canonical family. After the merge, Devichand (and any other nodes that
-    // were in the merged family but are NOT the deleted node) must appear in
-    // the canonical family's graph. The merged person itself is already
-    // soft-deleted (deleted_at IS NOT NULL) so it is excluded automatically.
-    await client.query(
-      `UPDATE persons
-       SET primary_family_id = $1, updated_at = NOW()
-       WHERE primary_family_id = $2
-         AND deleted_at IS NULL`,
-      [canonFamilyId, mergedFamilyId],
-    )
+    // Steps 5c–5e + family teardown only make sense for cross-family merges.
+    // In a same-family merge (canonFamilyId === mergedFamilyId) the persons,
+    // relationships, and members are already in the right place; tearing the
+    // family down would soft-delete the user's only family and lock them out.
+    if (canonFamilyId !== mergedFamilyId) {
+      // Step 5c: Transfer all surviving persons from the merged family into the
+      // canonical family. After the merge, Devichand (and any other nodes that
+      // were in the merged family but are NOT the deleted node) must appear in
+      // the canonical family's graph. The merged person itself is already
+      // soft-deleted (deleted_at IS NOT NULL) so it is excluded automatically.
+      await client.query(
+        `UPDATE persons
+         SET primary_family_id = $1, updated_at = NOW()
+         WHERE primary_family_id = $2
+           AND deleted_at IS NULL`,
+        [canonFamilyId, mergedFamilyId],
+      )
 
-    // Step 5d: Transfer all relationships from the merged family into the
-    // canonical family. The graph service queries relationships by
-    // primary_family_id, so without this step the redirected edges
-    // (e.g. Devichand → canonical Mahendra) remain invisible to Family B.
-    await client.query(
-      `UPDATE relationships
-       SET primary_family_id = $1
-       WHERE primary_family_id = $2
-         AND deleted_at IS NULL`,
-      [canonFamilyId, mergedFamilyId],
-    )
+      // Step 5d: Transfer all relationships from the merged family into the
+      // canonical family. The graph service queries relationships by
+      // primary_family_id, so without this step the redirected edges
+      // (e.g. Devichand → canonical Mahendra) remain invisible to Family B.
+      await client.query(
+        `UPDATE relationships
+         SET primary_family_id = $1
+         WHERE primary_family_id = $2
+           AND deleted_at IS NULL`,
+        [canonFamilyId, mergedFamilyId],
+      )
 
-    // Step 5e: Add every member of the merged family to the canonical family
-    // (skip users already there). This covers invited/joined members of the
-    // merged family who should now be part of the canonical family.
-    await client.query(
-      `INSERT INTO family_members (family_id, user_id, role)
-       SELECT $1, user_id, 'member'
-       FROM   family_members
-       WHERE  family_id = $2
-       ON CONFLICT DO NOTHING`,
-      [canonFamilyId, mergedFamilyId],
-    )
+      // Step 5e: Add every member of the merged family to the canonical family
+      // (skip users already there). This covers invited/joined members of the
+      // merged family who should now be part of the canonical family.
+      await client.query(
+        `INSERT INTO family_members (family_id, user_id, role)
+         SELECT $1, user_id, 'member'
+         FROM   family_members
+         WHERE  family_id = $2
+         ON CONFLICT DO NOTHING`,
+        [canonFamilyId, mergedFamilyId],
+      )
 
-    // Remove all members from the merged family so future JWT refreshes and
-    // logins no longer route users to this now-empty family.
-    await client.query(
-      `DELETE FROM family_members WHERE family_id = $1`,
-      [mergedFamilyId],
-    )
+      // Remove all members from the merged family so future JWT refreshes and
+      // logins no longer route users to this now-empty family.
+      await client.query(
+        `DELETE FROM family_members WHERE family_id = $1`,
+        [mergedFamilyId],
+      )
 
-    // Soft-delete the merged family itself so it is excluded from all queries
-    // that filter by deleted_at IS NULL (graph fetch, family lookups, etc.).
-    await client.query(
-      `UPDATE families SET deleted_at = NOW() WHERE id = $1`,
-      [mergedFamilyId],
-    )
+      // Soft-delete the merged family itself so it is excluded from all queries
+      // that filter by deleted_at IS NULL (graph fetch, family lookups, etc.).
+      await client.query(
+        `UPDATE families SET deleted_at = NOW() WHERE id = $1`,
+        [mergedFamilyId],
+      )
+    }
 
     // Step 5f: Infer cascade relationships that must exist after the merge but don't.
     //
@@ -762,12 +809,15 @@ export async function acceptMerge(
       }
     }
 
-    // Safety net: ensure the acceptor and the claimant (if any) each still have
-    // at least one active family membership after all the deletions above.
-    // This catches edge-cases where a user's only family_members row was removed
-    // during the merge flow (e.g. they were in both families and the bulk DELETE
-    // ran before the INSERT was flushed in an unexpected order).
-    const usersToCheck = Array.from(new Set([acceptedBy, ...(claimant ? [claimant] : [])]))
+    // Safety net: ensure every user who had a membership in either pre-merge
+    // family still has at least one active family membership. Catches the
+    // acceptor/claimant edge case and also covers other members that the
+    // family-teardown steps could strand during a future regression.
+    const usersToCheck = Array.from(new Set([
+      acceptedBy,
+      ...(claimant ? [claimant] : []),
+      ...preMergeUserIds,
+    ]))
     for (const uid of usersToCheck) {
       const { rows: memberships } = await client.query(
         `SELECT 1 FROM family_members fm
@@ -919,16 +969,27 @@ export async function rejectMerge(
   )
   if (!record) throw { status: 404, message: 'Merge request not found or already resolved' }
 
-  // Verify rejector is a member of the canonical family
+  // If the canonical node is claimed, only the claimant can reject.
+  // Otherwise any member of the canonical family can reject.
   const { rows: [canonPerson] } = await query<{ primary_family_id: string }>(
     `SELECT primary_family_id FROM persons WHERE id = $1`,
     [record.canonical_person_id],
   )
-  const { rows: [membership] } = await query(
-    `SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2`,
-    [canonPerson.primary_family_id, rejectedBy],
+  const { rows: [canonClaimant] } = await query<{ id: string }>(
+    `SELECT id FROM users WHERE person_id = $1 LIMIT 1`,
+    [record.canonical_person_id],
   )
-  if (!membership) throw { status: 403, message: 'You are not a member of the target family' }
+  if (canonClaimant) {
+    if (canonClaimant.id !== rejectedBy) {
+      throw { status: 403, message: 'Only the claimed owner of this node can reject this merge' }
+    }
+  } else {
+    const { rows: [membership] } = await query(
+      `SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2`,
+      [canonPerson.primary_family_id, rejectedBy],
+    )
+    if (!membership) throw { status: 403, message: 'You are not a member of the target family' }
+  }
 
   const { rowCount } = await query(
     `UPDATE merge_records SET status = 'rejected'
