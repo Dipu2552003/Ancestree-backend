@@ -1,7 +1,12 @@
 import bcrypt from 'bcrypt'
+import crypto from 'crypto'
 import pool, { query } from '../utils/db'
 import { signToken } from '../utils/jwt'
-import { SignupInput, LoginInput, CheckEmailInput } from '../schemas/auth.schema'
+import {
+  SignupInput, LoginInput, CheckEmailInput,
+  ChangeEmailInput, ChangePasswordInput,
+  ForgotPasswordInput, ResetPasswordInput,
+} from '../schemas/auth.schema'
 import { createNotification } from './notification.service'
 import { logger } from '../utils/logger'
 
@@ -254,4 +259,137 @@ export async function getMe(userId: string) {
   )
   if (!rows[0]) throw { status: 404, message: 'User not found' }
   return rows[0]
+}
+
+// ── Profile updates (require current password) ──────────────────────────────
+
+async function verifyCurrentPassword(userId: string, currentPassword: string): Promise<void> {
+  const { rows: [row] } = await query<{ password_hash: string }>(
+    `SELECT password_hash FROM users WHERE id = $1`,
+    [userId],
+  )
+  if (!row) throw { status: 404, message: 'User not found' }
+  const valid = await bcrypt.compare(currentPassword, row.password_hash)
+  if (!valid) {
+    logger.warn({ userId }, 'profile update: current password rejected')
+    throw { status: 401, message: 'Current password is incorrect' }
+  }
+}
+
+export async function changeEmail(userId: string, input: ChangeEmailInput) {
+  await verifyCurrentPassword(userId, input.current_password)
+
+  const { rowCount } = await query(
+    `SELECT 1 FROM users WHERE email = $1 AND id <> $2`,
+    [input.new_email, userId],
+  )
+  if ((rowCount ?? 0) > 0) {
+    throw { status: 409, message: 'That email is already in use' }
+  }
+
+  const { rows: [updated] } = await query<{ id: string; email: string }>(
+    `UPDATE users SET email = $1, updated_at = NOW()
+     WHERE id = $2
+     RETURNING id, email`,
+    [input.new_email, userId],
+  )
+  logger.info({ userId, newEmail: updated.email }, 'email changed')
+  return { id: updated.id, email: updated.email }
+}
+
+export async function changePassword(userId: string, input: ChangePasswordInput) {
+  await verifyCurrentPassword(userId, input.current_password)
+
+  if (input.current_password === input.new_password) {
+    throw { status: 400, message: 'New password must differ from current password' }
+  }
+
+  const passwordHash = await bcrypt.hash(input.new_password, 10)
+  await query(
+    `UPDATE users SET password_hash = $1,
+                      reset_token_hash = NULL,
+                      reset_token_expires_at = NULL,
+                      updated_at = NOW()
+     WHERE id = $2`,
+    [passwordHash, userId],
+  )
+  logger.info({ userId }, 'password changed')
+  return { success: true }
+}
+
+// ── Forgot / reset password (no auth required) ──────────────────────────────
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000  // 1 hour
+
+function sha256(input: string): string {
+  return crypto.createHash('sha256').update(input).digest('hex')
+}
+
+/**
+ * Stub for an email-sending integration. Today this only logs the link to the
+ * server console — replace with a real provider (Resend / SES / SendGrid) by
+ * swapping the body of this function. Returning silently lets the caller
+ * respond with the same "if that email exists, a link was sent" message
+ * regardless of whether the account exists, which avoids email enumeration.
+ */
+async function sendPasswordResetEmail(email: string, resetLink: string) {
+  logger.info({ email, resetLink }, 'TODO: integrate email provider — password reset link')
+  // eslint-disable-next-line no-console
+  console.log(`\n[password-reset] ${email} → ${resetLink}\n`)
+}
+
+export async function requestPasswordReset(input: ForgotPasswordInput) {
+  const { rows: [user] } = await query<{ id: string }>(
+    `SELECT id FROM users WHERE email = $1`,
+    [input.email],
+  )
+
+  if (user) {
+    const rawToken = crypto.randomBytes(32).toString('hex')
+    const tokenHash = sha256(rawToken)
+    const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS)
+
+    await query(
+      `UPDATE users SET reset_token_hash       = $1,
+                        reset_token_expires_at = $2,
+                        updated_at             = NOW()
+       WHERE id = $3`,
+      [tokenHash, expiresAt, user.id],
+    )
+
+    const base = process.env.APP_BASE_URL ?? 'http://localhost:3000'
+    const resetLink = `${base}/reset-password?token=${rawToken}`
+    await sendPasswordResetEmail(input.email, resetLink).catch(err =>
+      logger.warn({ err, email: input.email }, 'sendPasswordResetEmail failed'),
+    )
+  }
+
+  // Always respond identically — never reveal whether the email is registered.
+  return { success: true }
+}
+
+export async function resetPassword(input: ResetPasswordInput) {
+  const tokenHash = sha256(input.token)
+  const { rows: [user] } = await query<{ id: string }>(
+    `SELECT id FROM users
+     WHERE reset_token_hash       = $1
+       AND reset_token_expires_at > NOW()`,
+    [tokenHash],
+  )
+  if (!user) {
+    logger.warn({ tokenHashPrefix: tokenHash.slice(0, 8) }, 'reset password: invalid or expired token')
+    throw { status: 400, message: 'This reset link is invalid or has expired. Request a new one.' }
+  }
+
+  const passwordHash = await bcrypt.hash(input.new_password, 10)
+  await query(
+    `UPDATE users SET password_hash          = $1,
+                      reset_token_hash       = NULL,
+                      reset_token_expires_at = NULL,
+                      updated_at             = NOW()
+     WHERE id = $2`,
+    [passwordHash, user.id],
+  )
+  logger.info({ userId: user.id }, 'password reset via token')
+  return { success: true }
 }

@@ -41,9 +41,11 @@ export interface PotentialMatch {
   full_name:      string
   birth_year:     number | null
   native_village: string | null
+  current_city:   string | null
   gotra:          string | null
   gender:         string | null
   photo_url:      string | null
+  father_name:    string | null
   family_name:    string
   family_id:      string
   member_count:   number
@@ -58,9 +60,11 @@ interface DBCandidate {
   last_name:      string | null
   birth_year:     number | null
   native_village: string | null
+  current_city:   string | null
   gotra:          string | null
   gender:         string | null
   photo_url:      string | null
+  father_name:    string | null
   family_name:    string
   family_id:      string
   member_count:   number
@@ -139,11 +143,23 @@ export async function searchDuplicates(
 
   const { rows } = await query<DBCandidate>(
     `SELECT p.id, p.full_name, p.first_name, p.last_name,
-            p.birth_year, p.native_village, p.gotra, p.gender, p.photo_url,
+            p.birth_year, p.native_village, p.current_city,
+            p.gotra, p.gender, p.photo_url,
             f.name AS family_name, f.id AS family_id,
+            father.full_name AS father_name,
             (SELECT COUNT(*) FROM family_members fm WHERE fm.family_id = f.id)::int AS member_count
      FROM   persons p
      JOIN   families f ON f.id = p.primary_family_id
+     LEFT JOIN LATERAL (
+       SELECT fp.full_name
+       FROM   relationships fr
+       JOIN   persons fp ON fp.id = fr.from_person_id AND fp.deleted_at IS NULL
+       WHERE  fr.to_person_id = p.id
+         AND  fr.rel_type     = 'PARENT_OF'
+         AND  fr.deleted_at IS NULL
+       ORDER BY (fp.gender = 'male') DESC NULLS LAST, fp.person_code
+       LIMIT 1
+     ) father ON true
      WHERE  p.deleted_at        IS NULL
        AND  p.primary_family_id != $1
        AND  f.deleted_at        IS NULL
@@ -160,9 +176,11 @@ export async function searchDuplicates(
         full_name:      c.full_name,
         birth_year:     c.birth_year,
         native_village: c.native_village,
+        current_city:   c.current_city,
         gotra:          c.gotra,
         gender:         c.gender,
         photo_url:      c.photo_url,
+        father_name:    c.father_name,
         family_name:    c.family_name,
         family_id:      c.family_id,
         member_count:   c.member_count,

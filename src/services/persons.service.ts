@@ -106,11 +106,16 @@ export async function updatePerson(
   }
 
   const allowed = [
-    'full_name', 'first_name', 'last_name', 'name_native', 'nickname', 'gender',
-    'birth_year', 'birth_place', 'death_year', 'is_alive', 'bio', 'occupation',
+    'full_name', 'first_name', 'middle_name', 'last_name',
+    'name_native', 'nickname', 'gender', 'religion',
+    'birth_date', 'birth_year', 'birth_place',
+    'death_date', 'death_year', 'death_place',
+    'is_alive', 'bio', 'occupation', 'occupation_detail',
     'photo_url', 'visibility',
-    'current_city', 'current_state', 'current_country',
-    'native_village', 'gotra', 'education',
+    'phone', 'whatsapp', 'email',
+    'current_address', 'current_city', 'current_state', 'current_country', 'current_pincode',
+    'native_village', 'native_tehsil', 'native_district', 'native_state', 'native_country',
+    'gotra', 'education',
     'bio_mother_name', 'bio_father_name',
   ]
 

@@ -103,7 +103,74 @@ function computeRelToSelf(
   return labels
 }
 
-export async function fetchFamilyGraph(familyId: string, userId: string, userFamilyId: string, perspectivePersonId?: string) {
+/**
+ * Compute generation offset from perspective for every reachable person, via
+ * unbounded BFS over PARENT_OF / SPOUSE_OF / SIBLING_OF edges.
+ *
+ *   parent of N   → gen N-1
+ *   child of N    → gen N+1
+ *   spouse of N   → gen N
+ *   sibling of N  → gen N
+ *
+ * Edges that hit unknown persons are skipped.  Disconnected components are
+ * absent from the result (filtered out before reaching the client).
+ */
+function computeGenerations(
+  perspectiveId: string,
+  rels: DBRelationship[],
+): Map<string, number> {
+  const childrenOf = new Map<string, string[]>()
+  const parentsOf  = new Map<string, string[]>()
+  const spousesOf  = new Map<string, string[]>()
+  const siblingsOf = new Map<string, string[]>()
+
+  const push = (m: Map<string, string[]>, k: string, v: string) => {
+    const a = m.get(k); if (a) a.push(v); else m.set(k, [v])
+  }
+
+  for (const r of rels) {
+    if (r.rel_type === 'PARENT_OF') {
+      push(childrenOf, r.from_person_id, r.to_person_id)
+      push(parentsOf,  r.to_person_id,   r.from_person_id)
+    } else if (r.rel_type === 'SPOUSE_OF') {
+      push(spousesOf, r.from_person_id, r.to_person_id)
+      push(spousesOf, r.to_person_id,   r.from_person_id)
+    } else if (r.rel_type === 'SIBLING_OF') {
+      push(siblingsOf, r.from_person_id, r.to_person_id)
+      push(siblingsOf, r.to_person_id,   r.from_person_id)
+    }
+  }
+
+  const gen = new Map<string, number>([[perspectiveId, 0]])
+  const queue: string[] = [perspectiveId]
+
+  while (queue.length > 0) {
+    const id = queue.shift()!
+    const g  = gen.get(id)!
+
+    const visit = (next: string, nextGen: number) => {
+      if (gen.has(next)) return
+      gen.set(next, nextGen)
+      queue.push(next)
+    }
+
+    for (const p of parentsOf.get(id)  ?? []) visit(p, g - 1)
+    for (const c of childrenOf.get(id) ?? []) visit(c, g + 1)
+    for (const s of spousesOf.get(id)  ?? []) visit(s, g)
+    for (const s of siblingsOf.get(id) ?? []) visit(s, g)
+  }
+
+  return gen
+}
+
+export async function fetchFamilyGraph(
+  familyId: string,
+  userId: string,
+  userFamilyId: string,
+  perspectivePersonId?: string,
+  ancestorDepth: number = 10,
+  descendantDepth: number = 10,
+) {
   const [{ rows: persons }, { rows: rels }, { rows: [membership] }] = await Promise.all([
     query<DBPerson>(
       // Fetch this family's own persons PLUS any cross-family persons that are
@@ -161,9 +228,30 @@ export async function fetchFamilyGraph(familyId: string, userId: string, userFam
     return { nodes: [], edges: [], meta: { totalNodes: 0 } }
   }
 
-  const relToSelf = computeRelToSelf(selfId, persons, rels)
+  // ── Depth-bounded reachability from perspective ─────────────────────────
+  // Compute generation offset for every person reachable from the perspective
+  // (unbounded), then keep only those within [-ancestorDepth, +descendantDepth].
+  // Anything outside is held back for the "Load more" expand action; anything
+  // unreachable is dropped entirely (orphans never reach the client).
+  const generations    = computeGenerations(selfId, rels)
+  const ancestorClamp  = Math.max(0, ancestorDepth)
+  const descendantClamp = Math.max(0, descendantDepth)
 
-  const nodes = persons.map(p => ({
+  let hasMoreAncestors   = false
+  let hasMoreDescendants = false
+  const inRange = new Set<string>()
+  for (const [id, g] of generations) {
+    if (g < -ancestorClamp) { hasMoreAncestors   = true; continue }
+    if (g >  descendantClamp) { hasMoreDescendants = true; continue }
+    inRange.add(id)
+  }
+
+  const visiblePersons = persons.filter(p => inRange.has(p.id))
+  const visibleRels    = rels.filter(r => inRange.has(r.from_person_id) && inRange.has(r.to_person_id))
+
+  const relToSelf = computeRelToSelf(selfId, visiblePersons, visibleRels)
+
+  const nodes = visiblePersons.map(p => ({
     id: p.id,
     type: 'personNode',
     position: { x: 0, y: 0 },  // frontend computes actual positions
@@ -219,7 +307,7 @@ export async function fetchFamilyGraph(familyId: string, userId: string, userFam
     },
   }))
 
-  const edges = rels.map(r => ({
+  const edges = visibleRels.map(r => ({
     id: r.id,
     source: r.from_person_id,
     target: r.to_person_id,
@@ -231,10 +319,17 @@ export async function fetchFamilyGraph(familyId: string, userId: string, userFam
     },
   }))
 
-  logger.debug({ familyId, userId, nodes: nodes.length, edges: edges.length }, 'graph fetched')
+  logger.debug({ familyId, userId, nodes: nodes.length, edges: edges.length, ancestorDepth: ancestorClamp, descendantDepth: descendantClamp, hasMoreAncestors, hasMoreDescendants }, 'graph fetched')
   return {
     nodes,
     edges,
-    meta: { totalNodes: nodes.length },
+    meta: {
+      totalNodes:              nodes.length,
+      perspectivePersonId:     selfId,
+      effectiveAncestorDepth:   ancestorClamp,
+      effectiveDescendantDepth: descendantClamp,
+      hasMoreAncestors,
+      hasMoreDescendants,
+    },
   }
 }

@@ -1,6 +1,13 @@
 import { Router, Request, Response } from 'express'
-import { signupSchema, loginSchema, checkEmailSchema } from '../schemas/auth.schema'
-import { signup, login, getMe, refreshToken, checkEmail } from '../services/auth.service'
+import {
+  signupSchema, loginSchema, checkEmailSchema,
+  changeEmailSchema, changePasswordSchema,
+  forgotPasswordSchema, resetPasswordSchema,
+} from '../schemas/auth.schema'
+import {
+  signup, login, getMe, refreshToken, checkEmail,
+  changeEmail, changePassword, requestPasswordReset, resetPassword,
+} from '../services/auth.service'
 import { requireAuth } from '../middleware/auth'
 
 const router = Router()
@@ -60,6 +67,67 @@ router.get('/me', requireAuth, async (req: Request, res: Response) => {
 router.post('/refresh-token', requireAuth, async (req: Request, res: Response) => {
   try {
     const result = await refreshToken(req.user.userId)
+    res.json(result)
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
+  }
+})
+
+/** PATCH /api/auth/email — change the authenticated user's email (current password required) */
+router.patch('/email', requireAuth, async (req: Request, res: Response) => {
+  const parsed = changeEmailSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0].message })
+    return
+  }
+  try {
+    const result = await changeEmail(req.user.userId, parsed.data)
+    res.json(result)
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
+  }
+})
+
+/** PATCH /api/auth/password — change password (current password required) */
+router.patch('/password', requireAuth, async (req: Request, res: Response) => {
+  const parsed = changePasswordSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0].message })
+    return
+  }
+  try {
+    const result = await changePassword(req.user.userId, parsed.data)
+    res.json(result)
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
+  }
+})
+
+/** POST /api/auth/forgot-password — start the reset flow. Always responds 200 to
+ *  avoid leaking which emails are registered. */
+router.post('/forgot-password', async (req: Request, res: Response) => {
+  const parsed = forgotPasswordSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0].message })
+    return
+  }
+  try {
+    const result = await requestPasswordReset(parsed.data)
+    res.json(result)
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })
+  }
+})
+
+/** POST /api/auth/reset-password — complete the reset flow with the emailed token */
+router.post('/reset-password', async (req: Request, res: Response) => {
+  const parsed = resetPasswordSchema.safeParse(req.body)
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0].message })
+    return
+  }
+  try {
+    const result = await resetPassword(parsed.data)
     res.json(result)
   } catch (err: any) {
     res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error' })

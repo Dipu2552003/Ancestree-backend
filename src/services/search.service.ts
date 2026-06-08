@@ -29,12 +29,30 @@ export async function searchPersons(q: string, familyId: string, scope: SearchSc
             p.birth_year,
             p.node_state,
             p.photo_url,
+            p.native_village,
+            p.current_city,
             f.name AS family_name,
-            (p.primary_family_id = $3) AS is_own_family
+            (p.primary_family_id = $3) AS is_own_family,
+            father.full_name AS father_name
      FROM persons p
      JOIN families f
        ON f.id = p.primary_family_id
       AND f.deleted_at IS NULL
+     LEFT JOIN LATERAL (
+       -- Pick the male PARENT_OF parent as "father". When the parent's gender
+       -- is unrecorded, fall back to the first non-deleted parent so users
+       -- with partial data still see something useful.
+       SELECT fp.full_name
+       FROM   relationships fr
+       JOIN   persons fp
+         ON   fp.id = fr.from_person_id
+        AND   fp.deleted_at IS NULL
+       WHERE  fr.to_person_id = p.id
+         AND  fr.rel_type     = 'PARENT_OF'
+         AND  fr.deleted_at IS NULL
+       ORDER BY (fp.gender = 'male') DESC NULLS LAST, fp.person_code
+       LIMIT 1
+     ) father ON true
      WHERE p.deleted_at IS NULL
        ${familyClause}
        AND (

@@ -25,7 +25,26 @@ export const createPersonSchema = z.object({
   bio_father_name:  z.string().max(200).nullish(),
 })
 
-export const updatePersonSchema = createPersonSchema.partial()
+// The NodePanel edit form exposes more fields than the create flow does. List
+// the update-only fields explicitly so they survive Zod validation; without
+// this, unknown keys are stripped and silently dropped before the service runs.
+export const updatePersonSchema = createPersonSchema.partial().extend({
+  middle_name:       z.string().max(100).nullish(),
+  religion:          z.string().max(100).nullish(),
+  birth_date:        z.string().max(50).nullish(),
+  death_date:        z.string().max(50).nullish(),
+  death_place:       z.string().max(200).nullish(),
+  phone:             z.string().max(50).nullish(),
+  whatsapp:          z.string().max(50).nullish(),
+  email:             z.string().max(200).nullish(),
+  current_address:   z.string().max(500).nullish(),
+  current_pincode:   z.string().max(20).nullish(),
+  native_tehsil:     z.string().max(100).nullish(),
+  native_district:   z.string().max(100).nullish(),
+  native_state:      z.string().max(100).nullish(),
+  native_country:    z.string().max(100).nullish(),
+  occupation_detail: z.string().max(500).nullish(),
+})
 
 export type CreatePersonInput = z.infer<typeof createPersonSchema>
 export type UpdatePersonInput = z.infer<typeof updatePersonSchema>
