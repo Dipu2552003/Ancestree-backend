@@ -1,6 +1,9 @@
-import pool, { query } from '../utils/db'
+import { query } from '../utils/db'
+import { withTransaction } from '../utils/transaction'
 import { CreateRelationshipInput, UpdateRelationshipInput, ACTIVE_SPOUSE_SUBTYPES } from '../schemas/relationship.schema'
 import { logger } from '../utils/logger'
+import { badRequest, notFound, conflict } from '../utils/errors'
+import * as relsRepo from '../repositories/relationships.repo'
 
 function defaultSubType(rel_type: CreateRelationshipInput['rel_type']): string {
   if (rel_type === 'SPOUSE_OF')  return 'married'
@@ -38,7 +41,7 @@ export async function createRelationship(
   )
   if (persons.length < 2) {
     logger.warn({ from: input.from_person_id, to: input.to_person_id, familyId }, 'createRelationship: persons not found')
-    throw { status: 404, message: 'One or both persons not found in your family' }
+    throw notFound('One or both persons not found in your family')
   }
 
   const { rowCount: dup } = await query(
@@ -49,14 +52,14 @@ export async function createRelationship(
   )
   if (dup && dup > 0) {
     logger.warn({ from: input.from_person_id, to: input.to_person_id, type: input.rel_type }, 'createRelationship: duplicate')
-    throw { status: 409, message: 'This relationship already exists' }
+    throw conflict('This relationship already exists')
   }
 
   if (input.rel_type === 'PARENT_OF') {
     const cycle = await hasCycle(input.from_person_id, input.to_person_id)
     if (cycle) {
       logger.warn({ from: input.from_person_id, to: input.to_person_id }, 'createRelationship: cycle detected')
-      throw { status: 400, message: 'This relationship would create a cycle' }
+      throw badRequest('This relationship would create a cycle')
     }
   }
 
@@ -154,7 +157,7 @@ export async function updateRelationship(
      WHERE id = $1 AND primary_family_id = $2 AND deleted_at IS NULL`,
     [id, familyId],
   )
-  if (!existing) throw { status: 404, message: 'Relationship not found' }
+  if (!existing) throw notFound('Relationship not found')
 
   const fields: string[] = []
   const values: unknown[] = []
@@ -193,7 +196,7 @@ export async function updateRelationship(
      RETURNING *`,
     values,
   )
-  if (!updated) throw { status: 404, message: 'Relationship not found' }
+  if (!updated) throw notFound('Relationship not found')
 
   logger.info({ relId: id, fields: Object.keys(input), familyId }, 'relationship updated')
   return updated
@@ -211,16 +214,14 @@ export async function reparentChildren(
   userId: string,
   familyId: string,
 ): Promise<{ updated: number; skipped: number }> {
-  const client = await pool.connect()
-  let updated = 0
-  let skipped = 0
-  try {
-    await client.query('BEGIN')
+  const result = await withTransaction(async tx => {
+    let updated = 0
+    let skipped = 0
 
     for (const change of changes) {
       // Find the child's current mother(s) — i.e. PARENT_OF edges where
       // the source has gender='female' OR (lacking gender) is *not* the father.
-      const { rows: currentMothers } = await client.query<{ id: string; from_person_id: string }>(
+      const { rows: currentMothers } = await tx.query<{ id: string; from_person_id: string }>(
         `SELECT r.id, r.from_person_id
          FROM   relationships r
          JOIN   persons p ON p.id = r.from_person_id
@@ -239,15 +240,12 @@ export async function reparentChildren(
 
       // Soft-delete old mother edges (audit trail preserved).
       for (const m of currentMothers) {
-        await client.query(
-          `UPDATE relationships SET deleted_at = NOW() WHERE id = $1`,
-          [m.id],
-        )
+        await relsRepo.softDeleteById(m.id, tx)
       }
 
       // Insert new mother edge (skip when Unknown).
       if (change.new_mother_id) {
-        await client.query(
+        await tx.query(
           `INSERT INTO relationships
              (primary_family_id, from_person_id, to_person_id, rel_type, sub_type, is_active, created_by)
            VALUES ($1, $2, $3, 'PARENT_OF', 'biological', TRUE, $4)
@@ -258,15 +256,11 @@ export async function reparentChildren(
       updated++
     }
 
-    await client.query('COMMIT')
-    logger.info({ fatherId, updated, skipped, familyId }, 'reparentChildren')
     return { updated, skipped }
-  } catch (err) {
-    await client.query('ROLLBACK')
-    throw err
-  } finally {
-    client.release()
-  }
+  })
+
+  logger.info({ fatherId, updated: result.updated, skipped: result.skipped, familyId }, 'reparentChildren')
+  return result
 }
 
 export async function getRelationshipById(id: string, familyId: string) {
@@ -275,7 +269,7 @@ export async function getRelationshipById(id: string, familyId: string) {
      WHERE id = $1 AND primary_family_id = $2 AND deleted_at IS NULL`,
     [id, familyId]
   )
-  if (!rel) throw { status: 404, message: 'Relationship not found' }
+  if (!rel) throw notFound('Relationship not found')
   return rel
 }
 

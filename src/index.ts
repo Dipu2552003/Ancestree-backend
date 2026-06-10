@@ -3,8 +3,10 @@ import cors from 'cors'
 import helmet from 'helmet'
 import dotenv from 'dotenv'
 import pinoHttp from 'pino-http'
+import { ZodError } from 'zod'
 import { testConnection } from './utils/db'
 import { logger } from './utils/logger'
+import { isAppError } from './utils/errors'
 import { runMigrations } from '../database/migrate'
 import authRoutes          from './routes/auth.routes'
 import personsRoutes       from './routes/persons.routes'
@@ -62,7 +64,21 @@ app.use('/api/invite',        inviteRoutes)
 app.use('/api/merges',        mergesRoutes)
 app.use('/api/notifications', notificationsRoutes)
 
+// Global error handler. Recognises:
+//   • ZodError     → 400 with the first issue's message
+//   • AppError     → its own status + message (+ optional `code`)
+//   • anything else → 500 (logged at error level)
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  if (err instanceof ZodError) {
+    res.status(400).json({ error: err.issues[0]?.message ?? 'Invalid request', code: 'invalid_request' })
+    return
+  }
+  if (isAppError(err)) {
+    if (err.status >= 500) logger.error({ err }, 'app error')
+    else logger.warn({ status: err.status, code: err.code, message: err.message }, 'app error')
+    res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) })
+    return
+  }
   logger.error({ err }, 'unhandled error')
   res.status(500).json({ error: 'Internal server error' })
 })

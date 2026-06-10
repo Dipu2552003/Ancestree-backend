@@ -1,6 +1,7 @@
 import bcrypt from 'bcrypt'
 import crypto from 'crypto'
-import pool, { query } from '../utils/db'
+import { query } from '../utils/db'
+import { withTransaction } from '../utils/transaction'
 import { signToken } from '../utils/jwt'
 import {
   SignupInput, LoginInput, CheckEmailInput,
@@ -9,6 +10,7 @@ import {
 } from '../schemas/auth.schema'
 import { createNotification } from './notification.service'
 import { logger } from '../utils/logger'
+import { badRequest, unauthorized, notFound, conflict, serverError } from '../utils/errors'
 
 function buildNamePrefix(displayName: string): string {
   const lastName = displayName.trim().split(' ').pop() ?? displayName
@@ -26,37 +28,34 @@ export async function signup(input: SignupInput) {
   const existing = await query('SELECT id FROM users WHERE email = $1', [input.email])
   if ((existing.rowCount ?? 0) > 0) {
     logger.warn({ email: input.email }, 'signup: email already registered')
-    throw { status: 409, message: 'Email already registered' }
+    throw conflict('Email already registered')
   }
 
   const passwordHash = await bcrypt.hash(input.password, 10)
   const namePrefix = await uniquePrefix(buildNamePrefix(input.display_name))
 
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-
-    const { rows: [user] } = await client.query<{ id: string; email: string; display_name: string }>(
+  const { user, family, person } = await withTransaction(async tx => {
+    const { rows: [user] } = await tx.query<{ id: string; email: string; display_name: string }>(
       `INSERT INTO users (email, display_name, password_hash)
        VALUES ($1, $2, $3)
        RETURNING id, email, display_name`,
       [input.email, input.display_name, passwordHash]
     )
 
-    const { rows: [family] } = await client.query<{ id: string }>(
+    const { rows: [family] } = await tx.query<{ id: string }>(
       `INSERT INTO families (name, name_prefix, created_by)
        VALUES ($1, $2, $3)
        RETURNING id`,
       [`${input.display_name}'s Family`, namePrefix, user.id]
     )
 
-    await client.query(
+    await tx.query(
       `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, 'admin')`,
       [family.id, user.id]
     )
 
     const personCode = `${namePrefix}-001`
-    const { rows: [person] } = await client.query<{ id: string }>(
+    const { rows: [person] } = await tx.query<{ id: string }>(
       `INSERT INTO persons
          (person_code, primary_family_id, full_name, node_state, claimed_by, created_by, visibility)
        VALUES ($1, $2, $3, 'claimed', $4, $4, 'family')
@@ -64,22 +63,16 @@ export async function signup(input: SignupInput) {
       [personCode, family.id, input.display_name, user.id]
     )
 
-    await client.query('UPDATE users SET person_id = $1 WHERE id = $2', [person.id, user.id])
+    await tx.query('UPDATE users SET person_id = $1 WHERE id = $2', [person.id, user.id])
+    return { user, family, person }
+  })
 
-    await client.query('COMMIT')
+  const token = signToken({ userId: user.id, familyId: family.id })
 
-    const token = signToken({ userId: user.id, familyId: family.id })
+  sendClaimSuggestions(user.id, input.display_name, family.id).catch(() => {})
 
-    sendClaimSuggestions(user.id, input.display_name, family.id).catch(() => {})
-
-    logger.info({ userId: user.id, email: user.email, familyId: family.id }, 'signup')
-    return { token, user: { ...user, person_id: person.id, family_id: family.id } }
-  } catch (err) {
-    await client.query('ROLLBACK')
-    throw err
-  } finally {
-    client.release()
-  }
+  logger.info({ userId: user.id, email: user.email, familyId: family.id }, 'signup')
+  return { token, user: { ...user, person_id: person.id, family_id: family.id } }
 }
 
 /** Find proxy/invited nodes whose name matches the new user's display name. */
@@ -125,13 +118,13 @@ export async function login(input: LoginInput) {
   const user = rows[0]
   if (!user) {
     logger.warn({ email: input.email }, 'login: unknown email')
-    throw { status: 401, message: 'Invalid email or password' }
+    throw unauthorized('Invalid email or password')
   }
 
   const valid = await bcrypt.compare(input.password, user.password_hash)
   if (!valid) {
     logger.warn({ email: input.email, userId: user.id }, 'login: wrong password')
-    throw { status: 401, message: 'Invalid email or password' }
+    throw unauthorized('Invalid email or password')
   }
 
   // Prefer the family where person_id lives (same logic as refreshToken).
@@ -149,7 +142,7 @@ export async function login(input: LoginInput) {
      LIMIT 1`,
     [user.id, user.person_id],
   )
-  if (!member) throw { status: 500, message: 'No family found for user' }
+  if (!member) throw serverError('No family found for user')
 
   const token = signToken({ userId: user.id, familyId: member.family_id })
   logger.info({ userId: user.id, familyId: member.family_id }, 'login')
@@ -159,7 +152,7 @@ export async function login(input: LoginInput) {
 
 export async function signupViaInvite(input: SignupInput & { invite_token: string }) {
   const existing = await query('SELECT id FROM users WHERE email = $1', [input.email])
-  if ((existing.rowCount ?? 0) > 0) throw { status: 409, message: 'Email already registered' }
+  if ((existing.rowCount ?? 0) > 0) throw conflict('Email already registered')
 
   const { rows: [person] } = await query<{
     id: string; primary_family_id: string; node_state: string
@@ -168,48 +161,40 @@ export async function signupViaInvite(input: SignupInput & { invite_token: strin
      WHERE invite_token = $1 AND deleted_at IS NULL`,
     [input.invite_token.toUpperCase()]
   )
-  if (!person) throw { status: 404, message: 'Invalid or expired invite code' }
-  if (person.node_state === 'claimed') throw { status: 409, message: 'This node has already been claimed' }
+  if (!person) throw notFound('Invalid or expired invite code')
+  if (person.node_state === 'claimed') throw conflict('This node has already been claimed')
 
   const passwordHash = await bcrypt.hash(input.password, 10)
 
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-
-    const { rows: [user] } = await client.query<{ id: string; email: string; display_name: string }>(
+  const user = await withTransaction(async tx => {
+    const { rows: [user] } = await tx.query<{ id: string; email: string; display_name: string }>(
       `INSERT INTO users (email, display_name, password_hash)
        VALUES ($1, $2, $3) RETURNING id, email, display_name`,
       [input.email, input.display_name, passwordHash]
     )
 
-    await client.query(
+    await tx.query(
       `UPDATE persons SET node_state = 'claimed', claimed_by = $1, invite_token = NULL, updated_at = NOW()
        WHERE id = $2`,
       [user.id, person.id]
     )
 
-    await client.query(
+    await tx.query(
       `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, 'member')`,
       [person.primary_family_id, user.id]
     )
 
-    await client.query(
+    await tx.query(
       `UPDATE users SET person_id = $1 WHERE id = $2`,
       [person.id, user.id]
     )
 
-    await client.query('COMMIT')
+    return user
+  })
 
-    logger.info({ userId: user.id, personId: person.id, familyId: person.primary_family_id }, 'signup via invite')
-    const token = signToken({ userId: user.id, familyId: person.primary_family_id })
-    return { token, user: { ...user, person_id: person.id, family_id: person.primary_family_id } }
-  } catch (err) {
-    await client.query('ROLLBACK')
-    throw err
-  } finally {
-    client.release()
-  }
+  logger.info({ userId: user.id, personId: person.id, familyId: person.primary_family_id }, 'signup via invite')
+  const token = signToken({ userId: user.id, familyId: person.primary_family_id })
+  return { token, user: { ...user, person_id: person.id, family_id: person.primary_family_id } }
 }
 
 /**
@@ -239,7 +224,7 @@ export async function refreshToken(userId: string): Promise<{ token: string }> {
      LIMIT 1`,
     [userId, user?.person_id ?? null],
   )
-  if (!member) throw { status: 500, message: 'No family found for user' }
+  if (!member) throw serverError('No family found for user')
 
   const token = signToken({ userId, familyId: member.family_id })
   return { token }
@@ -257,7 +242,7 @@ export async function getMe(userId: string) {
     `SELECT id, email, display_name, person_id FROM users WHERE id = $1`,
     [userId]
   )
-  if (!rows[0]) throw { status: 404, message: 'User not found' }
+  if (!rows[0]) throw notFound('User not found')
   return rows[0]
 }
 
@@ -268,11 +253,11 @@ async function verifyCurrentPassword(userId: string, currentPassword: string): P
     `SELECT password_hash FROM users WHERE id = $1`,
     [userId],
   )
-  if (!row) throw { status: 404, message: 'User not found' }
+  if (!row) throw notFound('User not found')
   const valid = await bcrypt.compare(currentPassword, row.password_hash)
   if (!valid) {
     logger.warn({ userId }, 'profile update: current password rejected')
-    throw { status: 401, message: 'Current password is incorrect' }
+    throw unauthorized('Current password is incorrect')
   }
 }
 
@@ -284,7 +269,7 @@ export async function changeEmail(userId: string, input: ChangeEmailInput) {
     [input.new_email, userId],
   )
   if ((rowCount ?? 0) > 0) {
-    throw { status: 409, message: 'That email is already in use' }
+    throw conflict('That email is already in use')
   }
 
   const { rows: [updated] } = await query<{ id: string; email: string }>(
@@ -301,7 +286,7 @@ export async function changePassword(userId: string, input: ChangePasswordInput)
   await verifyCurrentPassword(userId, input.current_password)
 
   if (input.current_password === input.new_password) {
-    throw { status: 400, message: 'New password must differ from current password' }
+    throw badRequest('New password must differ from current password')
   }
 
   const passwordHash = await bcrypt.hash(input.new_password, 10)
@@ -378,7 +363,7 @@ export async function resetPassword(input: ResetPasswordInput) {
   )
   if (!user) {
     logger.warn({ tokenHashPrefix: tokenHash.slice(0, 8) }, 'reset password: invalid or expired token')
-    throw { status: 400, message: 'This reset link is invalid or has expired. Request a new one.' }
+    throw badRequest('This reset link is invalid or has expired. Request a new one.')
   }
 
   const passwordHash = await bcrypt.hash(input.new_password, 10)

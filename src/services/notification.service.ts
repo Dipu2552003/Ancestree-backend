@@ -1,4 +1,5 @@
 import { query } from '../utils/db'
+import { notFound } from '../utils/errors'
 
 export type NotificationType =
   | 'merge_request_received'
@@ -127,7 +128,7 @@ export async function markRead(notificationId: string, userId: string): Promise<
      WHERE id = $1 AND user_id = $2`,
     [notificationId, userId],
   )
-  if (!rowCount) throw { status: 404, message: 'Notification not found' }
+  if (!rowCount) throw notFound('Notification not found')
 }
 
 /** Mark all notifications for a user as read. */

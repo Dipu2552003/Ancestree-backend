@@ -1,5 +1,9 @@
-import pool, { query } from '../utils/db'
+import { query } from '../utils/db'
+import { withTransaction } from '../utils/transaction'
 import { logger } from '../utils/logger'
+import { notFound, conflict } from '../utils/errors'
+import * as personsRepo from '../repositories/persons.repo'
+import * as familyMembersRepo from '../repositories/familyMembers.repo'
 
 export async function claimByToken(token: string, userId: string) {
   const { rows: [person] } = await query<{
@@ -13,46 +17,25 @@ export async function claimByToken(token: string, userId: string) {
 
   if (!person) {
     logger.warn({ token }, 'claimByToken: invalid token')
-    throw { status: 404, message: 'Invalid or expired invite code' }
+    throw notFound('Invalid or expired invite code')
   }
   if (person.node_state === 'claimed') {
     logger.warn({ personId: person.id, userId }, 'claimByToken: already claimed')
-    throw { status: 409, message: 'This node has already been claimed' }
+    throw conflict('This node has already been claimed')
   }
-  if (person.claimed_by === userId) throw { status: 409, message: 'You already own this node' }
+  if (person.claimed_by === userId) throw conflict('You already own this node')
 
-  const { rows: [alreadyMember] } = await query(
-    `SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2`,
-    [person.primary_family_id, userId]
-  )
+  const alreadyMember = await familyMembersRepo.exists(person.primary_family_id, userId)
 
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-
-    await client.query(
-      `UPDATE persons
-       SET node_state = 'claimed', claimed_by = $1, invite_token = NULL, updated_at = NOW()
-       WHERE id = $2`,
-      [userId, person.id]
-    )
-
+  await withTransaction(async tx => {
+    await personsRepo.markClaimed(person.id, userId, tx)
     if (!alreadyMember) {
-      await client.query(
-        `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, 'member')`,
-        [person.primary_family_id, userId]
-      )
+      await familyMembersRepo.insert(person.primary_family_id, userId, 'member', tx)
     }
+  })
 
-    await client.query('COMMIT')
-    logger.info({ personId: person.id, userId, familyId: person.primary_family_id }, 'invite claimed')
-    return { success: true, person_id: person.id, family_id: person.primary_family_id, full_name: person.full_name }
-  } catch (err) {
-    await client.query('ROLLBACK')
-    throw err
-  } finally {
-    client.release()
-  }
+  logger.info({ personId: person.id, userId, familyId: person.primary_family_id }, 'invite claimed')
+  return { success: true, person_id: person.id, family_id: person.primary_family_id, full_name: person.full_name }
 }
 
 export async function lookupToken(token: string) {
@@ -96,8 +79,8 @@ export async function lookupToken(token: string) {
     [token.toUpperCase()]
   )
 
-  if (!person) throw { status: 404, message: 'Invalid or expired invite code' }
-  if (person.node_state === 'claimed') throw { status: 409, message: 'This node has already been claimed' }
+  if (!person) throw notFound('Invalid or expired invite code')
+  if (person.node_state === 'claimed') throw conflict('This node has already been claimed')
 
   return person
 }

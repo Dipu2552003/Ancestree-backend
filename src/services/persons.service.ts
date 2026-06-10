@@ -1,9 +1,13 @@
 import crypto from 'crypto'
-import pool, { query } from '../utils/db'
+import { query } from '../utils/db'
+import { withTransaction } from '../utils/transaction'
 import { CreatePersonInput, UpdatePersonInput } from '../schemas/person.schema'
-import { searchDuplicates } from './merge.service'
+import { searchDuplicates } from './merge'
 import { createPossibleMatchNotification } from './notification.service'
 import { logger } from '../utils/logger'
+import { badRequest, forbidden, notFound } from '../utils/errors'
+import * as personsRepo from '../repositories/persons.repo'
+import * as relsRepo from '../repositories/relationships.repo'
 
 async function nextPersonCode(familyId: string): Promise<string> {
   const { rows: [fam] } = await query<{ name_prefix: string; person_code_seq: number }>(
@@ -88,7 +92,7 @@ export async function getPersonById(id: string, familyId: string) {
     `SELECT * FROM persons WHERE id = $1 AND primary_family_id = $2 AND deleted_at IS NULL`,
     [id, familyId]
   )
-  if (!person) throw { status: 404, message: 'Person not found' }
+  if (!person) throw notFound('Person not found')
   return person
 }
 
@@ -102,7 +106,7 @@ export async function updatePerson(
 
   if (person.node_state === 'claimed' && person.claimed_by !== userId) {
     logger.warn({ personId: id, userId, claimedBy: person.claimed_by }, 'updatePerson: forbidden')
-    throw { status: 403, message: 'Only the profile owner can edit a claimed profile' }
+    throw forbidden('Only the profile owner can edit a claimed profile')
   }
 
   const allowed = [
@@ -122,7 +126,7 @@ export async function updatePerson(
   const fields = Object.entries(input).filter(
     ([k, v]) => allowed.includes(k) && v !== undefined
   )
-  if (fields.length === 0) throw { status: 400, message: 'No valid fields to update' }
+  if (fields.length === 0) throw badRequest('No valid fields to update')
 
   const setClauses = fields.map(([k], i) => `${k} = $${i + 2}`).join(', ')
   const values = fields.map(([, v]) => v)
@@ -135,7 +139,7 @@ export async function updatePerson(
   // When the user explicitly sets a real name, check whether that person
   // already exists in another family's tree and return the matches so the
   // frontend can offer a merge request immediately.
-  let potential_matches: import('./merge.service').PotentialMatch[] = []
+  let potential_matches: import('./merge').PotentialMatch[] = []
   const newName = input.full_name?.trim() ?? ''
   if (newName && newName.toLowerCase() !== 'unknown') {
     potential_matches = await searchDuplicates({
@@ -173,10 +177,10 @@ export async function generateInviteToken(id: string, userId: string, familyId: 
   const person = await getPersonById(id, familyId)
 
   if (person.node_state !== 'proxy') {
-    throw { status: 400, message: 'Only proxy nodes can be invited' }
+    throw badRequest('Only proxy nodes can be invited')
   }
   if (!person.is_alive) {
-    throw { status: 400, message: 'Cannot invite a deceased person' }
+    throw badRequest('Cannot invite a deceased person')
   }
 
   const token = crypto.randomBytes(4).toString('hex').toUpperCase()
@@ -195,70 +199,35 @@ export async function deletePerson(id: string, userId: string, familyId: string)
 
   if (person.claimed_by === userId) {
     logger.warn({ personId: id, userId }, 'deletePerson: tried to delete own node')
-    throw { status: 403, message: 'You cannot delete your own node' }
+    throw forbidden('You cannot delete your own node')
   }
 
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-
+  await withTransaction(async tx => {
     // Remove edges that attach this person to their parents' family unit:
-    // 1. PARENT_OF edges pointing TO this person (Keshav→Ishu, Shilpa→Ishu)
-    await client.query(
-      `UPDATE relationships SET deleted_at = NOW()
-       WHERE to_person_id = $1 AND rel_type = 'PARENT_OF' AND deleted_at IS NULL`,
-      [id],
-    )
+    //   1. PARENT_OF inbound — parents → this person
+    //   2. SIBLING_OF (any direction)
+    //   3. SPOUSE_OF (any direction)
+    //   4. PARENT_OF outbound — this person → their children
+    await relsRepo.softDeleteInboundByType(id, 'PARENT_OF', tx)
+    await relsRepo.softDeleteForPersonByType(id, 'SIBLING_OF', tx)
+    await relsRepo.softDeleteForPersonByType(id, 'SPOUSE_OF', tx)
+    await relsRepo.softDeleteOutboundByType(id, 'PARENT_OF', tx)
 
-    // 2. SIBLING_OF edges (derived from the shared-parent relationship)
-    await client.query(
-      `UPDATE relationships SET deleted_at = NOW()
-       WHERE (from_person_id = $1 OR to_person_id = $1)
-         AND rel_type = 'SIBLING_OF' AND deleted_at IS NULL`,
-      [id],
-    )
-
-    // 3. SPOUSE_OF edges
-    await client.query(
-      `UPDATE relationships SET deleted_at = NOW()
-       WHERE (from_person_id = $1 OR to_person_id = $1)
-         AND rel_type = 'SPOUSE_OF' AND deleted_at IS NULL`,
-      [id],
-    )
-
-    // 4. PARENT_OF edges FROM this person (this person → their children)
-    await client.query(
-      `UPDATE relationships SET deleted_at = NOW()
-       WHERE from_person_id = $1 AND rel_type = 'PARENT_OF' AND deleted_at IS NULL`,
-      [id],
-    )
-
-    // Check whether any edges remain (anything unexpected)
-    const { rows: [{ remaining }] } = await client.query<{ remaining: string }>(
-      `SELECT COUNT(*) AS remaining FROM relationships
-       WHERE (from_person_id = $1 OR to_person_id = $1) AND deleted_at IS NULL`,
-      [id],
-    )
-    const hasOwnFamily = parseInt(remaining) > 0
+    const remaining = await relsRepo.countActiveForPerson(id, tx)
+    const hasOwnFamily = remaining > 0
 
     // Only hard-delete the node if it is unclaimed AND has no remaining connections.
     // Claimed nodes are never deleted — the account owner still exists.
     // Proxy/invited nodes with a spouse or children stay as their own family unit.
     const softDeleted = !hasOwnFamily && person.node_state !== 'claimed'
     if (softDeleted) {
-      await client.query(`UPDATE persons SET deleted_at = NOW() WHERE id = $1`, [id])
-    } else if (!softDeleted) {
+      await personsRepo.softDelete(id, tx)
+    } else {
       logger.warn({ personId: id, userId, hasOwnFamily, nodeState: person.node_state }, 'person node kept — relationships removed only')
     }
 
-    await client.query('COMMIT')
     logger.info({ personId: id, userId, softDeleted }, 'person deleted')
-  } catch (err) {
-    await client.query('ROLLBACK')
-    throw err
-  } finally {
-    client.release()
-  }
+  })
 
   return { success: true }
 }
