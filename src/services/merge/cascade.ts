@@ -24,7 +24,7 @@
 //   After merge canonical Mahendra has both Yash and Dipkul as children,
 //   but Joshana→Yash (Case 1) and Yash↔Dipkul (Case 2) are still missing.
 
-import type { QueryRunner } from '../../utils/db'
+import { auditCreate, type OperationContext, type Snapshot } from '../../utils/audit'
 
 export interface CascadeContext {
   canonicalId:   string
@@ -37,10 +37,12 @@ export interface CascadeContext {
 }
 
 /**
- * Runs inside the acceptMerge transaction (`tx` is the tx-scoped runner).
+ * Runs inside the acceptMerge operation (`op.tx` is the tx-scoped runner, and
+ * every inferred edge is audited under the merge's operation_id).
  * Must be called AFTER all relationships have been moved into canonFamilyId.
  */
-export async function inferCascadeRelationships(tx: QueryRunner, ctx: CascadeContext): Promise<void> {
+export async function inferCascadeRelationships(op: OperationContext, ctx: CascadeContext): Promise<void> {
+  const tx = op.tx
   const { canonicalId, canonFamilyId, acceptedBy, newChildIds, newSpouseIds, newSiblingIds, newParentIds } = ctx
 
   if (newChildIds.length === 0 && newSpouseIds.length === 0 && newSiblingIds.length === 0 && newParentIds.length === 0) {
@@ -53,7 +55,7 @@ export async function inferCascadeRelationships(tx: QueryRunner, ctx: CascadeCon
   const safeInsertRel = async (
     from: string, to: string, relType: string,
   ) => {
-    await tx.query(
+    const { rows: [inserted] } = await tx.query<Snapshot>(
       `INSERT INTO relationships (from_person_id, to_person_id, rel_type, primary_family_id, created_by)
        SELECT $1, $2, $3, $4, $5
        WHERE NOT EXISTS (
@@ -69,9 +71,11 @@ export async function inferCascadeRelationships(tx: QueryRunner, ctx: CascadeCon
            AND  rel_type          = 'PARENT_OF'
            AND  primary_family_id = $4
            AND  deleted_at        IS NULL
-       ) < 2)`,
+       ) < 2)
+       RETURNING *`,
       [from, to, relType, canonFamilyId, acceptedBy],
     )
+    if (inserted) await auditCreate(op, 'relationship', inserted)
   }
 
   // All relationships are already in canonFamilyId; use the pre-captured

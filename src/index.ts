@@ -16,6 +16,9 @@ import searchRoutes        from './routes/search.routes'
 import inviteRoutes        from './routes/invite.routes'
 import mergesRoutes        from './routes/merges.routes'
 import notificationsRoutes from './routes/notifications.routes'
+import historyRoutes       from './routes/history.routes'
+import communityRoutes     from './routes/community.routes'
+import familyRoutes        from './routes/family.routes'
 
 dotenv.config()
 
@@ -33,7 +36,9 @@ app.use(cors({
   },
   credentials: true,
 }))
-app.use(express.json())
+// Photo uploads arrive as base64 data URLs inside the JSON body (480px JPEG
+// + 96px thumb ≈ up to ~150 KB) — the express default of 100kb rejects them.
+app.use(express.json({ limit: '2mb' }))
 
 app.use(pinoHttp({
   logger,
@@ -63,6 +68,9 @@ app.use('/api/search',        searchRoutes)
 app.use('/api/invite',        inviteRoutes)
 app.use('/api/merges',        mergesRoutes)
 app.use('/api/notifications', notificationsRoutes)
+app.use('/api/family',        historyRoutes)
+app.use('/api/community',     communityRoutes)
+app.use('/api/family',        familyRoutes)
 
 // Global error handler. Recognises:
 //   • ZodError     → 400 with the first issue's message

@@ -2,8 +2,9 @@ import jwt from 'jsonwebtoken'
 import { logger } from './logger'
 
 export interface JwtPayload {
-  userId: string
-  familyId: string
+  userId:      string
+  familyId:    string
+  communityId?: string | null
 }
 
 const rawSecret = process.env.JWT_SECRET

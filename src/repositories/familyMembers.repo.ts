@@ -1,6 +1,10 @@
 // Thin SQL surface for the `family_members` join table.
+//
+// Reads accept an optional QueryRunner; the insert requires an
+// OperationContext so membership changes are always audited.
 
 import { defaultRunner, type QueryRunner } from '../utils/db'
+import { auditCreate, type OperationContext, type Snapshot } from '../utils/audit'
 
 /** True when (familyId, userId) is already a member. */
 export async function exists(
@@ -18,11 +22,12 @@ export async function exists(
 export async function insert(
   familyId: string,
   userId: string,
-  role: 'owner' | 'member' = 'member',
-  runner: QueryRunner = defaultRunner,
+  role: 'admin' | 'member' = 'member',
+  op: OperationContext,
 ): Promise<void> {
-  await runner.query(
-    `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, $3)`,
+  const { rows: [row] } = await op.tx.query<Snapshot>(
+    `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, $3) RETURNING *`,
     [familyId, userId, role],
   )
+  if (row) await auditCreate(op, 'family_member', row, { familyId })
 }

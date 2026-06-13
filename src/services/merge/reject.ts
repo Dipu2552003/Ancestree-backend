@@ -2,6 +2,7 @@
 // record to 'rejected' and notifies the initiator.
 
 import { query } from '../../utils/db'
+import { withOperation, captureAndUpdate } from '../../utils/audit'
 import { createNotification } from '../notification.service'
 import { logger } from '../../utils/logger'
 import { forbidden, notFound, conflict } from '../../utils/errors'
@@ -42,12 +43,14 @@ export async function rejectMerge(
     if (!membership) throw forbidden('You are not a member of the target family')
   }
 
-  const { rowCount } = await query(
-    `UPDATE merge_records SET status = 'rejected'
-     WHERE id = $1 AND status = 'proposed'`,
-    [mergeRecordId],
+  const { after } = await withOperation(
+    { action: 'merge.reject', actorId: rejectedBy, familyId: canonPerson.primary_family_id },
+    op => captureAndUpdate(op, 'merge_record',
+      { sql: `id = $1 AND status = 'proposed'`, params: [mergeRecordId] },
+      { sql: `status = 'rejected'` },
+    ),
   )
-  if (!rowCount) {
+  if (after.length === 0) {
     logger.warn({ mergeRecordId, rejectedBy }, 'rejectMerge: already resolved')
     throw conflict('Merge request was already resolved')
   }

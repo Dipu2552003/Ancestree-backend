@@ -12,7 +12,9 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const scope = rawScope === 'external' ? 'external'
               : rawScope === 'own'      ? 'own'
                                         : 'all'
-  const results = await searchPersons(q, req.user.familyId, scope)
+  // Community users only see results within their walled garden
+  const communityId = req.user.communityId ?? null
+  const results = await searchPersons(q, req.user.familyId, scope, communityId)
   res.json(results)
 }))
 

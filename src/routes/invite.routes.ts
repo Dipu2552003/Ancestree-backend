@@ -33,7 +33,7 @@ router.post('/signup-and-claim', asyncHandler(async (req: Request, res: Response
   if (!email || !password || !display_name || !invite_token) {
     throw badRequest('email, password, display_name and invite_token are required')
   }
-  const result = await signupViaInvite({ email, password, display_name, invite_token })
+  const result = await signupViaInvite({ email, password, display_name, tree_type: 'public', invite_token })
   res.status(201).json(result)
 }))
 

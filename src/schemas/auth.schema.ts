@@ -1,9 +1,12 @@
 import { z } from 'zod'
 
 export const signupSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  email:        z.string().email(),
+  password:     z.string().min(8, 'Password must be at least 8 characters'),
   display_name: z.string().min(1).max(100),
+  // 'public'  → anyone on the platform can discover this tree (default)
+  // 'private' → no external search or discovery; invite-only access
+  tree_type:    z.enum(['public', 'private']).default('public'),
 })
 
 export const loginSchema = z.object({

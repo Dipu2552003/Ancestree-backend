@@ -1,9 +1,11 @@
 // Thin SQL surface for the `persons` table.
 //
-// Every function accepts an optional QueryRunner so the same call works both
-// inside and outside a withTransaction() callback.
+// Reads accept an optional QueryRunner so the same call works both inside and
+// outside a withTransaction() callback. Mutations require an OperationContext
+// — every write is audited and stamped with the operation_id.
 
 import { defaultRunner, type QueryRunner } from '../utils/db'
+import { captureAndUpdate, type OperationContext } from '../utils/audit'
 
 export interface PersonRow {
   id:                string
@@ -35,24 +37,27 @@ export async function findByIdInFamily<T = PersonRow>(
 /** Soft-delete a person by id. */
 export async function softDelete(
   id: string,
-  runner: QueryRunner = defaultRunner,
+  op: OperationContext,
 ): Promise<void> {
-  await runner.query(
-    `UPDATE persons SET deleted_at = NOW() WHERE id = $1`,
-    [id],
-  )
+  await captureAndUpdate(op, 'person', {
+    sql: 'id = $1 AND deleted_at IS NULL',
+    params: [id],
+  }, {
+    sql: 'deleted_at = NOW()',
+  })
 }
 
 /** Mark a node `claimed` and attach a user as the owner. Used by invite-claim and signup-via-invite. */
 export async function markClaimed(
   personId: string,
   userId: string,
-  runner: QueryRunner = defaultRunner,
+  op: OperationContext,
 ): Promise<void> {
-  await runner.query(
-    `UPDATE persons
-     SET node_state = 'claimed', claimed_by = $1, invite_token = NULL, updated_at = NOW()
-     WHERE id = $2`,
-    [userId, personId],
-  )
+  await captureAndUpdate(op, 'person', {
+    sql: 'id = $1',
+    params: [personId],
+  }, {
+    sql: `node_state = 'claimed', claimed_by = $1, invite_token = NULL, updated_at = NOW()`,
+    params: [userId],
+  })
 }

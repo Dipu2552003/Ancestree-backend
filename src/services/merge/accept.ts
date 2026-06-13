@@ -4,7 +4,7 @@
 // side-effects (notifications, family-head recompute, conflict detection) run
 // after COMMIT so a failure there never rolls back the merge itself.
 
-import { withTransaction } from '../../utils/transaction'
+import { withOperation, captureAndUpdate, captureAndDelete, auditCreate, type Snapshot } from '../../utils/audit'
 import { createNotification, notifyFamily } from '../notification.service'
 import { recomputeFamilyHead } from '../familyHead.service'
 import { detectMergeConflicts, type MergeConflict, type ConflictContext } from '../mergeConflicts.service'
@@ -22,7 +22,8 @@ export async function acceptMerge(
 ): Promise<{ canonical_person_id: string; conflicts: MergeConflict[] }> {
   logger.info({ mergeRecordId, acceptedBy }, 'merge accept: start')
 
-  const txResult = await withTransaction(async tx => {
+  const txResult = await withOperation({ action: 'merge.accept', actorId: acceptedBy }, async op => {
+    const tx = op.tx
     // Step 1: Validate — record must exist and be proposed
     const { rows: [record] } = await tx.query<{
       id: string; canonical_person_id: string; merged_person_id: string; initiated_by: string
@@ -54,6 +55,9 @@ export async function acceptMerge(
     const canonFamilyId  = canonPerson.primary_family_id
     const mergedFamilyId = mergedPerson.primary_family_id
 
+    // All audit rows for this merge are scoped to the surviving family.
+    op.familyId = canonFamilyId
+
     // If the canonical node is claimed, only the claimant can accept.
     // Otherwise any member of the canonical family can accept.
     const { rows: [canonClaimant] } = await tx.query<{ id: string }>(
@@ -83,21 +87,18 @@ export async function acceptMerge(
     const preMergeUserIds = preMergeMembers.map(r => r.user_id)
 
     // Step 3: Redirect all relationships from deleted node → canonical node
-    await tx.query(
-      `UPDATE relationships SET from_person_id = $1
-       WHERE  from_person_id = $2 AND deleted_at IS NULL`,
-      [canonicalId, deletedId],
+    await captureAndUpdate(op, 'relationship',
+      { sql: 'from_person_id = $1 AND deleted_at IS NULL', params: [deletedId] },
+      { sql: 'from_person_id = $1', params: [canonicalId] },
     )
-    await tx.query(
-      `UPDATE relationships SET to_person_id = $1
-       WHERE  to_person_id = $2 AND deleted_at IS NULL`,
-      [canonicalId, deletedId],
+    await captureAndUpdate(op, 'relationship',
+      { sql: 'to_person_id = $1 AND deleted_at IS NULL', params: [deletedId] },
+      { sql: 'to_person_id = $1', params: [canonicalId] },
     )
 
     // Step 4: Remove exact duplicates created by the redirect
-    await tx.query(
-      `DELETE FROM relationships
-       WHERE id IN (
+    await captureAndDelete(op, 'relationship', {
+      sql: `id IN (
          SELECT r1.id
          FROM   relationships r1
          WHERE  r1.deleted_at IS NULL
@@ -111,7 +112,7 @@ export async function acceptMerge(
                AND  r2.created_at     < r1.created_at
            )
        )`,
-    )
+    })
 
     // ── Capture merge context (must happen BEFORE step 5d moves all relationships
     //    to canonFamilyId, after which old vs new are indistinguishable).
@@ -184,11 +185,11 @@ export async function acceptMerge(
     const newPersonIds = newPersonRows.map(r => r.id)
 
     // Step 5: Soft-delete the duplicate node — capture claimed_by before deletion
-    const { rows: [deletedPersonInfo] } = await tx.query<{ claimed_by: string | null }>(
-      `UPDATE persons SET deleted_at = NOW() WHERE id = $1 RETURNING claimed_by`,
-      [deletedId],
+    const { before: deletedPersonBefore } = await captureAndUpdate(op, 'person',
+      { sql: 'id = $1', params: [deletedId] },
+      { sql: 'deleted_at = NOW()' },
     )
-    const claimant = deletedPersonInfo?.claimed_by ?? null
+    const claimant = (deletedPersonBefore[0]?.claimed_by as string | null) ?? null
     let orphanedUserId: string | null = null
 
     // Step 5b: If the deleted node was claimed (e.g. a new user whose self-node
@@ -201,33 +202,34 @@ export async function acceptMerge(
     //  • users.person_id points to canonical node
     if (claimant) {
       // Transfer claim only when canonical is still unclaimed.
-      // If rowCount is 0, canonical was already claimed by someone else → orphan.
-      const { rowCount } = await tx.query(
-        `UPDATE persons
-         SET claimed_by = $1, node_state = 'claimed', updated_at = NOW()
-         WHERE id = $2 AND (claimed_by IS NULL OR node_state IN ('proxy', 'invited'))`,
-        [claimant, canonicalId],
+      // If no row matched, canonical was already claimed by someone else → orphan.
+      const { after: claimAfter } = await captureAndUpdate(op, 'person',
+        { sql: `id = $1 AND (claimed_by IS NULL OR node_state IN ('proxy', 'invited'))`, params: [canonicalId] },
+        { sql: `claimed_by = $1, node_state = 'claimed', updated_at = NOW()`, params: [claimant] },
       )
-      if ((rowCount ?? 0) === 0) orphanedUserId = claimant
+      if (claimAfter.length === 0) orphanedUserId = claimant
       // Join the canonical family
-      await tx.query(
+      const { rows: [claimantJoin] } = await tx.query<Snapshot>(
         `INSERT INTO family_members (family_id, user_id, role)
          VALUES ($1, $2, 'member')
-         ON CONFLICT DO NOTHING`,
+         ON CONFLICT DO NOTHING
+         RETURNING *`,
         [canonFamilyId, claimant],
       )
+      if (claimantJoin) await auditCreate(op, 'family_member', claimantJoin)
       // Leave the now-empty merged family so the next JWT issued picks the right one.
       // Skip in same-family merges — both ids point at the user's only family.
       if (canonFamilyId !== mergedFamilyId) {
-        await tx.query(
-          `DELETE FROM family_members WHERE family_id = $1 AND user_id = $2`,
-          [mergedFamilyId, claimant],
+        await captureAndDelete(op, 'family_member',
+          { sql: 'family_id = $1 AND user_id = $2', params: [mergedFamilyId, claimant] },
         )
       }
-      // Point user record at the surviving node
-      await tx.query(
-        `UPDATE users SET person_id = $1 WHERE id = $2`,
-        [canonicalId, claimant],
+      // Point user record at the surviving node. Snapshot only the graph
+      // pointer — account data (email, password hash) stays out of the log.
+      await captureAndUpdate(op, 'user',
+        { sql: 'id = $1', params: [claimant] },
+        { sql: 'person_id = $1', params: [canonicalId] },
+        { snapshotCols: 'id, person_id' },
       )
     }
 
@@ -241,57 +243,52 @@ export async function acceptMerge(
       // were in the merged family but are NOT the deleted node) must appear in
       // the canonical family's graph. The merged person itself is already
       // soft-deleted (deleted_at IS NOT NULL) so it is excluded automatically.
-      await tx.query(
-        `UPDATE persons
-         SET primary_family_id = $1, updated_at = NOW()
-         WHERE primary_family_id = $2
-           AND deleted_at IS NULL`,
-        [canonFamilyId, mergedFamilyId],
+      await captureAndUpdate(op, 'person',
+        { sql: 'primary_family_id = $1 AND deleted_at IS NULL', params: [mergedFamilyId] },
+        { sql: 'primary_family_id = $1, updated_at = NOW()', params: [canonFamilyId] },
       )
 
       // Step 5d: Transfer all relationships from the merged family into the
       // canonical family. The graph service queries relationships by
       // primary_family_id, so without this step the redirected edges
       // (e.g. Devichand → canonical Mahendra) remain invisible to Family B.
-      await tx.query(
-        `UPDATE relationships
-         SET primary_family_id = $1
-         WHERE primary_family_id = $2
-           AND deleted_at IS NULL`,
-        [canonFamilyId, mergedFamilyId],
+      await captureAndUpdate(op, 'relationship',
+        { sql: 'primary_family_id = $1 AND deleted_at IS NULL', params: [mergedFamilyId] },
+        { sql: 'primary_family_id = $1', params: [canonFamilyId] },
       )
 
       // Step 5e: Add every member of the merged family to the canonical family
       // (skip users already there). This covers invited/joined members of the
       // merged family who should now be part of the canonical family.
-      await tx.query(
+      const { rows: copiedMembers } = await tx.query<Snapshot>(
         `INSERT INTO family_members (family_id, user_id, role)
          SELECT $1, user_id, 'member'
          FROM   family_members
          WHERE  family_id = $2
-         ON CONFLICT DO NOTHING`,
+         ON CONFLICT DO NOTHING
+         RETURNING *`,
         [canonFamilyId, mergedFamilyId],
       )
+      for (const m of copiedMembers) await auditCreate(op, 'family_member', m)
 
       // Remove all members from the merged family so future JWT refreshes and
       // logins no longer route users to this now-empty family.
-      await tx.query(
-        `DELETE FROM family_members WHERE family_id = $1`,
-        [mergedFamilyId],
+      await captureAndDelete(op, 'family_member',
+        { sql: 'family_id = $1', params: [mergedFamilyId] },
       )
 
       // Soft-delete the merged family itself so it is excluded from all queries
       // that filter by deleted_at IS NULL (graph fetch, family lookups, etc.).
-      await tx.query(
-        `UPDATE families SET deleted_at = NOW() WHERE id = $1`,
-        [mergedFamilyId],
+      await captureAndUpdate(op, 'family',
+        { sql: 'id = $1', params: [mergedFamilyId] },
+        { sql: 'deleted_at = NOW()' },
       )
     }
 
     // Step 5f: Infer cascade relationships that must exist after the merge but
     // don't — runs after the family transfer so every edge it inspects/creates
     // lives in canonFamilyId. See cascade.ts.
-    await inferCascadeRelationships(tx, {
+    await inferCascadeRelationships(op, {
       canonicalId, canonFamilyId, acceptedBy,
       newChildIds, newSpouseIds, newSiblingIds, newParentIds,
     })
@@ -314,36 +311,23 @@ export async function acceptMerge(
         [uid],
       )
       if (memberships.length === 0) {
-        await tx.query(
+        const { rows: [restored] } = await tx.query<Snapshot>(
           `INSERT INTO family_members (family_id, user_id, role)
-           VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING`,
+           VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING
+           RETURNING *`,
           [canonFamilyId, uid],
         )
+        if (restored) await auditCreate(op, 'family_member', restored)
         logger.warn({ uid, canonFamilyId }, 'merge safety net: restored missing family membership')
       }
     }
 
-    // Step 6: Update merge_records
-    await tx.query(
-      `UPDATE merge_records
-       SET status       = 'confirmed',
-           confirmed_by = $1,
-           merged_at    = NOW()
-       WHERE id = $2`,
-      [acceptedBy, mergeRecordId],
-    )
-
-    // Step 7: Audit log
-    await tx.query(
-      `INSERT INTO audit_log
-         (family_id, actor_id, action, entity_type, entity_id, after_state)
-       VALUES ($1, $2, 'merge.confirmed', 'person', $3, $4)`,
-      [
-        canonFamilyId,
-        acceptedBy,
-        canonicalId,
-        JSON.stringify({ merge_record_id: mergeRecordId, deleted_person_id: deletedId }),
-      ],
+    // Step 6: Update merge_records. (The old hand-written "Step 7" audit
+    // insert is gone — every statement above already logs itself through the
+    // audit writer under one shared operation_id.)
+    await captureAndUpdate(op, 'merge_record',
+      { sql: 'id = $1', params: [mergeRecordId] },
+      { sql: `status = 'confirmed', confirmed_by = $1, merged_at = NOW()`, params: [acceptedBy] },
     )
 
     return {

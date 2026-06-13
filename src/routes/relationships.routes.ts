@@ -27,12 +27,12 @@ router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
 
 router.patch('/:id', validate(updateRelationshipSchema), asyncHandler(async (req: Request, res: Response) => {
   const input = req.validated as UpdateRelationshipInput
-  const rel = await updateRelationship(req.params.id as string, input, req.user.familyId)
+  const rel = await updateRelationship(req.params.id as string, input, req.user.userId, req.user.familyId)
   res.json(rel)
 }))
 
 router.delete('/:id', asyncHandler(async (req: Request, res: Response) => {
-  const result = await deleteRelationship(req.params.id as string, req.user.familyId)
+  const result = await deleteRelationship(req.params.id as string, req.user.userId, req.user.familyId)
   res.json(result)
 }))
 

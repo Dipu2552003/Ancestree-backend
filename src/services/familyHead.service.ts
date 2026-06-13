@@ -1,4 +1,5 @@
 import { query } from '../utils/db'
+import { withOperation, captureAndUpdate } from '../utils/audit'
 
 /**
  * Recomputes which person is the "head" of a family and updates families.name
@@ -68,12 +69,19 @@ export async function recomputeFamilyHead(familyId: string): Promise<void> {
   const firstName = rawName.split(/\s+/)[0] ?? ''
   const familyName = firstName ? `${firstName} Family` : 'Family'
 
-  await query(
-    `UPDATE families
-     SET head_person_id = $1,
-         name           = $2,
-         updated_at     = NOW()
-     WHERE id = $3`,
-    [head.id, familyName, familyId],
+  // Skip the write (and the audit noise) when nothing would change.
+  const { rows: [current] } = await query<{ head_person_id: string | null; name: string }>(
+    `SELECT head_person_id, name FROM families WHERE id = $1`,
+    [familyId],
+  )
+  if (current && current.head_person_id === head.id && current.name === familyName) return
+
+  // System-driven recompute — no human actor.
+  await withOperation(
+    { action: 'family.update_head', actorId: null, familyId },
+    op => captureAndUpdate(op, 'family',
+      { sql: 'id = $1', params: [familyId] },
+      { sql: 'head_person_id = $1, name = $2, updated_at = NOW()', params: [head.id, familyName] },
+    ),
   )
 }

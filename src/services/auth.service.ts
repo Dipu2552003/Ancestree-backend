@@ -1,7 +1,7 @@
 import bcrypt from 'bcrypt'
 import crypto from 'crypto'
 import { query } from '../utils/db'
-import { withTransaction } from '../utils/transaction'
+import { withOperation, captureAndUpdate, auditCreate, type Snapshot } from '../utils/audit'
 import { signToken } from '../utils/jwt'
 import {
   SignupInput, LoginInput, CheckEmailInput,
@@ -34,36 +34,52 @@ export async function signup(input: SignupInput) {
   const passwordHash = await bcrypt.hash(input.password, 10)
   const namePrefix = await uniquePrefix(buildNamePrefix(input.display_name))
 
-  const { user, family, person } = await withTransaction(async tx => {
+  // 'public' trees are discoverable by everyone; 'private' trees are invite-only.
+  const treeVisibility = input.tree_type ?? 'public'
+
+  const { user, family, person } = await withOperation({ action: 'family.create' }, async op => {
+    const tx = op.tx
+
+    // User account row is deliberately not audited (account data, not tree
+    // data) — only its person_id graph pointer is, below.
     const { rows: [user] } = await tx.query<{ id: string; email: string; display_name: string }>(
       `INSERT INTO users (email, display_name, password_hash)
        VALUES ($1, $2, $3)
        RETURNING id, email, display_name`,
       [input.email, input.display_name, passwordHash]
     )
+    op.actorId = user.id
 
-    const { rows: [family] } = await tx.query<{ id: string }>(
-      `INSERT INTO families (name, name_prefix, created_by)
-       VALUES ($1, $2, $3)
-       RETURNING id`,
-      [`${input.display_name}'s Family`, namePrefix, user.id]
+    const { rows: [family] } = await tx.query<Snapshot & { id: string }>(
+      `INSERT INTO families (name, name_prefix, created_by, visibility)
+       VALUES ($1, $2, $3, $4)
+       RETURNING *`,
+      [`${input.display_name}'s Family`, namePrefix, user.id, treeVisibility]
     )
+    op.familyId = family.id
+    await auditCreate(op, 'family', family)
 
-    await tx.query(
-      `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, 'admin')`,
+    const { rows: [membership] } = await tx.query<Snapshot>(
+      `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, 'admin') RETURNING *`,
       [family.id, user.id]
     )
+    await auditCreate(op, 'family_member', membership)
 
     const personCode = `${namePrefix}-001`
-    const { rows: [person] } = await tx.query<{ id: string }>(
+    const { rows: [person] } = await tx.query<Snapshot & { id: string }>(
       `INSERT INTO persons
          (person_code, primary_family_id, full_name, node_state, claimed_by, created_by, visibility)
-       VALUES ($1, $2, $3, 'claimed', $4, $4, 'family')
-       RETURNING id`,
-      [personCode, family.id, input.display_name, user.id]
+       VALUES ($1, $2, $3, 'claimed', $4, $4, $5)
+       RETURNING *`,
+      [personCode, family.id, input.display_name, user.id, treeVisibility]
     )
+    await auditCreate(op, 'person', person)
 
-    await tx.query('UPDATE users SET person_id = $1 WHERE id = $2', [person.id, user.id])
+    await captureAndUpdate(op, 'user',
+      { sql: 'id = $1', params: [user.id] },
+      { sql: 'person_id = $1', params: [person.id] },
+      { snapshotCols: 'id, person_id' },
+    )
     return { user, family, person }
   })
 
@@ -166,31 +182,39 @@ export async function signupViaInvite(input: SignupInput & { invite_token: strin
 
   const passwordHash = await bcrypt.hash(input.password, 10)
 
-  const user = await withTransaction(async tx => {
-    const { rows: [user] } = await tx.query<{ id: string; email: string; display_name: string }>(
-      `INSERT INTO users (email, display_name, password_hash)
-       VALUES ($1, $2, $3) RETURNING id, email, display_name`,
-      [input.email, input.display_name, passwordHash]
-    )
+  const user = await withOperation(
+    { action: 'person.claim', familyId: person.primary_family_id },
+    async op => {
+      const tx = op.tx
 
-    await tx.query(
-      `UPDATE persons SET node_state = 'claimed', claimed_by = $1, invite_token = NULL, updated_at = NOW()
-       WHERE id = $2`,
-      [user.id, person.id]
-    )
+      // User account row not audited — see signup().
+      const { rows: [user] } = await tx.query<{ id: string; email: string; display_name: string }>(
+        `INSERT INTO users (email, display_name, password_hash)
+         VALUES ($1, $2, $3) RETURNING id, email, display_name`,
+        [input.email, input.display_name, passwordHash]
+      )
+      op.actorId = user.id
 
-    await tx.query(
-      `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, 'member')`,
-      [person.primary_family_id, user.id]
-    )
+      await captureAndUpdate(op, 'person',
+        { sql: 'id = $1', params: [person.id] },
+        { sql: `node_state = 'claimed', claimed_by = $1, invite_token = NULL, updated_at = NOW()`, params: [user.id] },
+      )
 
-    await tx.query(
-      `UPDATE users SET person_id = $1 WHERE id = $2`,
-      [person.id, user.id]
-    )
+      const { rows: [membership] } = await tx.query<Snapshot>(
+        `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, 'member') RETURNING *`,
+        [person.primary_family_id, user.id]
+      )
+      await auditCreate(op, 'family_member', membership)
 
-    return user
-  })
+      await captureAndUpdate(op, 'user',
+        { sql: 'id = $1', params: [user.id] },
+        { sql: 'person_id = $1', params: [person.id] },
+        { snapshotCols: 'id, person_id' },
+      )
+
+      return user
+    },
+  )
 
   logger.info({ userId: user.id, personId: person.id, familyId: person.primary_family_id }, 'signup via invite')
   const token = signToken({ userId: user.id, familyId: person.primary_family_id })

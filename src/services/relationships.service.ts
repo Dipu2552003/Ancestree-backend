@@ -1,5 +1,5 @@
 import { query } from '../utils/db'
-import { withTransaction } from '../utils/transaction'
+import { withOperation, captureAndUpdate, auditCreate, type OperationContext, type Snapshot } from '../utils/audit'
 import { CreateRelationshipInput, UpdateRelationshipInput, ACTIVE_SPOUSE_SUBTYPES } from '../schemas/relationship.schema'
 import { logger } from '../utils/logger'
 import { badRequest, notFound, conflict } from '../utils/errors'
@@ -68,33 +68,40 @@ export async function createRelationship(
     ? ACTIVE_SPOUSE_SUBTYPES.has(subType as never)
     : true
 
-  const { rows: [rel] } = await query(
-    `INSERT INTO relationships
-       (primary_family_id, from_person_id, to_person_id, rel_type, sub_type, union_year, separation_year, is_active, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-     RETURNING *`,
-    [
-      familyId,
-      input.from_person_id,
-      input.to_person_id,
-      input.rel_type,
-      subType,
-      input.union_year      ?? null,
-      input.separation_year ?? null,
-      isActive,
-      userId,
-    ]
+  const rel = await withOperation(
+    { action: 'relationship.create', actorId: userId, familyId },
+    async op => {
+      const { rows: [rel] } = await op.tx.query<Snapshot>(
+        `INSERT INTO relationships
+           (primary_family_id, from_person_id, to_person_id, rel_type, sub_type, union_year, separation_year, is_active, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING *`,
+        [
+          familyId,
+          input.from_person_id,
+          input.to_person_id,
+          input.rel_type,
+          subType,
+          input.union_year      ?? null,
+          input.separation_year ?? null,
+          isActive,
+          userId,
+        ]
+      )
+      await auditCreate(op, 'relationship', rel)
+
+      // NOTE: We do NOT auto-create PARENT_OF edges from the new spouse to the
+      // anchor's existing children. PARENT_OF is the sole source of truth for
+      // parentage and must be set explicitly by the caller. This lets the 2nd-wife
+      // flow leave existing children attached to the 1st wife unless the user
+      // re-assigns them through Flow E Phase 3 (the /reparent endpoint).
+
+      if (input.rel_type === 'SIBLING_OF') {
+        await linkSiblingGroup(op, input.from_person_id, input.to_person_id, familyId, userId)
+      }
+      return rel
+    },
   )
-
-  // NOTE: We do NOT auto-create PARENT_OF edges from the new spouse to the
-  // anchor's existing children. PARENT_OF is the sole source of truth for
-  // parentage and must be set explicitly by the caller. This lets the 2nd-wife
-  // flow leave existing children attached to the 1st wife unless the user
-  // re-assigns them through Flow E Phase 3 (the /reparent endpoint).
-
-  if (input.rel_type === 'SIBLING_OF') {
-    await linkSiblingGroup(input.from_person_id, input.to_person_id, familyId, userId)
-  }
 
   logger.info({ relId: rel.id, from: input.from_person_id, to: input.to_person_id, type: input.rel_type, familyId }, 'relationship created')
   return rel
@@ -105,13 +112,14 @@ export async function createRelationship(
 // Example: A already has siblings [X, Y], B has siblings [P]:
 //   new pairs needed → A-P, X-B, X-P, Y-B, Y-P  (A-B was just inserted)
 async function linkSiblingGroup(
+  op: OperationContext,
   personA: string,
   personB: string,
   familyId: string,
   createdBy: string,
 ): Promise<void> {
   const sibsOf = async (id: string, exclude: string) => {
-    const { rows } = await query<{ id: string }>(
+    const { rows } = await op.tx.query<{ id: string }>(
       `SELECT CASE WHEN from_person_id = $1 THEN to_person_id ELSE from_person_id END AS id
        FROM   relationships
        WHERE  (from_person_id = $1 OR to_person_id = $1)
@@ -130,7 +138,7 @@ async function linkSiblingGroup(
   for (const x of groupA) {
     for (const y of groupB) {
       if (x === personA && y === personB) continue  // already inserted
-      await query(
+      const { rows: [inserted] } = await op.tx.query<Snapshot>(
         `INSERT INTO relationships (primary_family_id, from_person_id, to_person_id, rel_type, created_by)
          SELECT $1, $2, $3, 'SIBLING_OF', $4
          WHERE NOT EXISTS (
@@ -139,9 +147,11 @@ async function linkSiblingGroup(
                 OR (from_person_id = $3 AND to_person_id = $2))
              AND  rel_type   = 'SIBLING_OF'
              AND  deleted_at IS NULL
-         )`,
+         )
+         RETURNING *`,
         [familyId, x, y, createdBy],
       )
+      if (inserted) await auditCreate(op, 'relationship', inserted)
     }
   }
 }
@@ -149,6 +159,7 @@ async function linkSiblingGroup(
 export async function updateRelationship(
   id: string,
   input: UpdateRelationshipInput,
+  userId: string,
   familyId: string,
 ) {
   // Fetch the row first so we know the rel_type (sub_type semantics depend on it).
@@ -188,15 +199,18 @@ export async function updateRelationship(
   if (fields.length === 0) {
     return { id, updated: false }
   }
-  values.push(id, familyId)
 
-  const { rows: [updated] } = await query(
-    `UPDATE relationships SET ${fields.join(', ')}
-     WHERE id = $${i++} AND primary_family_id = $${i} AND deleted_at IS NULL
-     RETURNING *`,
-    values,
+  const updated = await withOperation(
+    { action: 'relationship.update', actorId: userId, familyId },
+    async op => {
+      const { after } = await captureAndUpdate(op, 'relationship',
+        { sql: 'id = $1 AND primary_family_id = $2 AND deleted_at IS NULL', params: [id, familyId] },
+        { sql: fields.join(', '), params: values },
+      )
+      if (after.length === 0) throw notFound('Relationship not found')
+      return after[0]
+    },
   )
-  if (!updated) throw notFound('Relationship not found')
 
   logger.info({ relId: id, fields: Object.keys(input), familyId }, 'relationship updated')
   return updated
@@ -214,14 +228,14 @@ export async function reparentChildren(
   userId: string,
   familyId: string,
 ): Promise<{ updated: number; skipped: number }> {
-  const result = await withTransaction(async tx => {
+  const result = await withOperation({ action: 'person.reparent', actorId: userId, familyId }, async op => {
     let updated = 0
     let skipped = 0
 
     for (const change of changes) {
       // Find the child's current mother(s) — i.e. PARENT_OF edges where
       // the source has gender='female' OR (lacking gender) is *not* the father.
-      const { rows: currentMothers } = await tx.query<{ id: string; from_person_id: string }>(
+      const { rows: currentMothers } = await op.tx.query<{ id: string; from_person_id: string }>(
         `SELECT r.id, r.from_person_id
          FROM   relationships r
          JOIN   persons p ON p.id = r.from_person_id
@@ -240,18 +254,20 @@ export async function reparentChildren(
 
       // Soft-delete old mother edges (audit trail preserved).
       for (const m of currentMothers) {
-        await relsRepo.softDeleteById(m.id, tx)
+        await relsRepo.softDeleteById(m.id, op)
       }
 
       // Insert new mother edge (skip when Unknown).
       if (change.new_mother_id) {
-        await tx.query(
+        const { rows: [inserted] } = await op.tx.query<Snapshot>(
           `INSERT INTO relationships
              (primary_family_id, from_person_id, to_person_id, rel_type, sub_type, is_active, created_by)
            VALUES ($1, $2, $3, 'PARENT_OF', 'biological', TRUE, $4)
-           ON CONFLICT DO NOTHING`,
+           ON CONFLICT DO NOTHING
+           RETURNING *`,
           [familyId, change.new_mother_id, change.child_id, userId],
         )
+        if (inserted) await auditCreate(op, 'relationship', inserted)
       }
       updated++
     }
@@ -273,9 +289,12 @@ export async function getRelationshipById(id: string, familyId: string) {
   return rel
 }
 
-export async function deleteRelationship(id: string, familyId: string) {
+export async function deleteRelationship(id: string, userId: string, familyId: string) {
   await getRelationshipById(id, familyId)
-  await query(`UPDATE relationships SET deleted_at = NOW() WHERE id = $1`, [id])
+  await withOperation(
+    { action: 'relationship.delete', actorId: userId, familyId },
+    op => relsRepo.softDeleteById(id, op),
+  )
   logger.info({ relId: id, familyId }, 'relationship deleted')
   return { success: true }
 }

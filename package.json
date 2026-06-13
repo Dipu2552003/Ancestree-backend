@@ -5,7 +5,8 @@
   "scripts": {
     "migrate": "ts-node database/migrate.ts",
     "dev": "ts-node src/index.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "verify:recovery": "ts-node database/verifyRecovery.ts"
   },
   "dependencies": {
     "@types/cors": "^2.8.19",

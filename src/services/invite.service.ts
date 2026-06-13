@@ -1,5 +1,5 @@
 import { query } from '../utils/db'
-import { withTransaction } from '../utils/transaction'
+import { withOperation } from '../utils/audit'
 import { logger } from '../utils/logger'
 import { notFound, conflict } from '../utils/errors'
 import * as personsRepo from '../repositories/persons.repo'
@@ -27,12 +27,15 @@ export async function claimByToken(token: string, userId: string) {
 
   const alreadyMember = await familyMembersRepo.exists(person.primary_family_id, userId)
 
-  await withTransaction(async tx => {
-    await personsRepo.markClaimed(person.id, userId, tx)
-    if (!alreadyMember) {
-      await familyMembersRepo.insert(person.primary_family_id, userId, 'member', tx)
-    }
-  })
+  await withOperation(
+    { action: 'person.claim', actorId: userId, familyId: person.primary_family_id },
+    async op => {
+      await personsRepo.markClaimed(person.id, userId, op)
+      if (!alreadyMember) {
+        await familyMembersRepo.insert(person.primary_family_id, userId, 'member', op)
+      }
+    },
+  )
 
   logger.info({ personId: person.id, userId, familyId: person.primary_family_id }, 'invite claimed')
   return { success: true, person_id: person.id, family_id: person.primary_family_id, full_name: person.full_name }

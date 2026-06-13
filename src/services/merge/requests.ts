@@ -2,6 +2,7 @@
 // acceptMerge / rejectMerge (the resolution paths) live in accept.ts / reject.ts.
 
 import { query } from '../../utils/db'
+import { withOperation, auditCreate, type Snapshot } from '../../utils/audit'
 import { createNotification, notifyFamily } from '../notification.service'
 import { logger } from '../../utils/logger'
 import { forbidden, notFound } from '../../utils/errors'
@@ -84,6 +85,26 @@ export async function createMergeRequest(
     throw forbidden('You can only request merges for persons in your own family')
   }
 
+  // Block cross-community merges: both families must share the same community scope
+  // (both public → null === null, or both in the same community → same UUID).
+  const { rows: [initiatorScope] } = await query<{ community_id: string | null }>(
+    `SELECT community_id FROM families WHERE id = $1`,
+    [initiatorFamilyId],
+  )
+  const { rows: [canonScope] } = await query<{ community_id: string | null }>(
+    `SELECT f.community_id FROM families f
+     JOIN   persons p ON p.primary_family_id = f.id
+     WHERE  p.id = $1 AND f.deleted_at IS NULL`,
+    [canonicalPersonId],
+  )
+  if (initiatorScope && canonScope &&
+      initiatorScope.community_id !== canonScope.community_id) {
+    throw forbidden(
+      'Merges are only allowed between families in the same community scope. ' +
+      'A community family cannot merge with a public family.',
+    )
+  }
+
   // Prevent duplicate pending requests for the same pair
   const { rows: existing } = await query(
     `SELECT id FROM merge_records
@@ -96,14 +117,21 @@ export async function createMergeRequest(
     return { merge_record_id: existing[0].id as string }
   }
 
-  const { rows: [record] } = await query<{ id: string }>(
-    `INSERT INTO merge_records
-       (canonical_person_id, merged_person_id, initiated_by, status)
-     VALUES ($1, $2, $3, 'proposed')
-     RETURNING id`,
-    [canonicalPersonId, newPersonId, initiatedBy],
+  const record = await withOperation(
+    { action: 'merge.request', actorId: initiatedBy, familyId: initiatorFamilyId },
+    async op => {
+      const { rows: [row] } = await op.tx.query<Snapshot>(
+        `INSERT INTO merge_records
+           (canonical_person_id, merged_person_id, initiated_by, status)
+         VALUES ($1, $2, $3, 'proposed')
+         RETURNING *`,
+        [canonicalPersonId, newPersonId, initiatedBy],
+      )
+      await auditCreate(op, 'merge_record', row)
+      return row
+    },
   )
-  const mergeRecordId = record.id
+  const mergeRecordId = record.id as string
 
   // Fetch person names for the notification message
   const { rows: persons } = await query<{ id: string; full_name: string; primary_family_id: string }>(

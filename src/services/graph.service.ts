@@ -4,7 +4,7 @@ import { logger } from '../utils/logger'
 
 interface DBPerson {
   id: string; full_name: string; first_name: string | null; middle_name: string | null; last_name: string | null
-  name_native: string | null; nickname: string | null; gender: string | null
+  nickname: string | null; gender: string | null
   gotra: string | null; religion: string | null
   birth_date: string | null; birth_year: number | null; birth_place: string | null
   death_date: string | null; death_year: number | null; death_place: string | null; is_alive: boolean
@@ -14,7 +14,7 @@ interface DBPerson {
   native_village: string | null; native_tehsil: string | null; native_district: string | null
   native_state: string | null; native_country: string | null
   occupation: string | null; occupation_detail: string | null; education: string | null; bio: string | null
-  photo_url: string | null; node_state: string; claimed_by: string | null
+  photo_url: string | null; photo_thumbnail_url: string | null; node_state: string; claimed_by: string | null
   created_by: string; visibility: string; person_code: string; primary_family_id: string
 }
 
@@ -179,7 +179,7 @@ export async function fetchFamilyGraph(
       // family) visible in the graph after a merge.
       `SELECT DISTINCT
               p.id, p.person_code, p.primary_family_id, p.node_state, p.claimed_by, p.created_by, p.visibility,
-              p.full_name, p.first_name, p.middle_name, p.last_name, p.name_native, p.nickname,
+              p.full_name, p.first_name, p.middle_name, p.last_name, p.nickname,
               p.gender, p.gotra, p.religion,
               p.birth_date, p.birth_year, p.birth_place,
               p.is_alive, p.death_date, p.death_year, p.death_place,
@@ -187,7 +187,7 @@ export async function fetchFamilyGraph(
               p.current_address, p.current_city, p.current_state, p.current_country, p.current_pincode,
               p.native_village, p.native_tehsil, p.native_district, p.native_state, p.native_country,
               p.occupation, p.occupation_detail, p.education, p.bio,
-              p.photo_url
+              p.photo_url, p.photo_thumbnail_url
        FROM persons p
        WHERE p.deleted_at IS NULL
          AND (
@@ -273,12 +273,14 @@ export async function fetchFamilyGraph(
       // Cross-family canonical nodes (primary_family_id differs) are fully read-only.
       canEdit:            p.primary_family_id === userFamilyId,
       canEditProfile:     p.primary_family_id === userFamilyId && (p.node_state === 'claimed' ? p.claimed_by === userId : true),
-      canDelete:          p.primary_family_id === userFamilyId && p.claimed_by !== userId,
+      // Claimed nodes belong to a real user — no one can hard-delete them,
+      // only disconnect (remove relationships). Proxy/invited nodes can be
+      // deleted freely by any family member, except the viewer's own node.
+      canDelete:          p.primary_family_id === userFamilyId && p.node_state !== 'claimed',
       canInvite:          p.primary_family_id === userFamilyId && p.node_state === 'proxy' && p.is_alive,
       firstName:          p.first_name,
       middleName:         p.middle_name,
       lastName:           p.last_name,
-      nameNative:         p.name_native,
       nickname:           p.nickname,
       gender:             p.gender,
       gotra:              p.gotra,
@@ -304,6 +306,7 @@ export async function fetchFamilyGraph(
       occupationDetail:   p.occupation_detail,
       education:          p.education,
       bio:                p.bio,
+      photoThumbnailUrl:  p.photo_thumbnail_url,
     },
   }))
 
