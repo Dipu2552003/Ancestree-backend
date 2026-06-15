@@ -15,7 +15,6 @@ services:
     plan: free                  # FREE: sleeps after ~15 min idle (~50s cold start).
                                 # Keep PROD warm with an UptimeRobot ping to /health
                                 # every ~10 min; let the dev service sleep.
-    rootDir: backend
     # devDeps (typescript/ts-node) are needed to build, so force-include them:
     buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
