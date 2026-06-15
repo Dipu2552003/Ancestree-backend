@@ -75,10 +75,10 @@ export async function createCommunity(input: CreateCommunityInput) {
     )
     op.actorId = user.id
 
-    const { rows: [community] } = await tx.query<{ id: string; name: string; slug: string }>(
+    const { rows: [community] } = await tx.query<{ id: string; name: string; slug: string; join_code: string }>(
       `INSERT INTO communities (name, slug, description, owner_id, member_limit)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, name, slug`,
+       RETURNING id, name, slug, join_code`,
       [input.name, input.slug, input.description ?? null, user.id, input.member_limit ?? 0],
     )
 
@@ -124,7 +124,7 @@ export async function createCommunity(input: CreateCommunityInput) {
   logger.info({ communityId: community.id, slug: input.slug, ownerId: user.id }, 'community created')
   return {
     token,
-    community: { id: community.id, name: community.name, slug: community.slug },
+    community: { id: community.id, name: community.name, slug: community.slug, join_code: community.join_code },
     user: { id: user.id, email: user.email, display_name: user.display_name, person_id: person.id, family_id: family.id, community_id: community.id },
   }
 }
@@ -266,18 +266,27 @@ export async function communitySignup(slug: string, input: CommunitySignupInput)
     }
   }
 
-  // Invite code is optional — communities allow open signup by default.
-  // If a code is provided, validate it so invite-specific tracking still works.
+  // Invite code is required — open signup is disabled for communities.
+  if (!input.invite_code) throw badRequest('An invite code is required to join this community')
+
+  // Accept either a targeted community_invites code (single-use) or the
+  // community's own permanent join_code (reusable — no used_by tracking).
   let inviteId: string | null = null
-  if (input.invite_code) {
-    const { rows: [invite] } = await query<{ id: string }>(
-      `SELECT id FROM community_invites
-       WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
-         AND  (expires_at IS NULL OR expires_at > NOW())`,
-      [input.invite_code, community.id],
-    )
-    if (!invite) throw badRequest('Invalid or expired invite code')
+
+  const { rows: [invite] } = await query<{ id: string }>(
+    `SELECT id FROM community_invites
+     WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
+       AND  (expires_at IS NULL OR expires_at > NOW())`,
+    [input.invite_code, community.id],
+  )
+  if (invite) {
     inviteId = invite.id
+  } else {
+    const { rows: [joinMatch] } = await query<{ id: string }>(
+      `SELECT id FROM communities WHERE id = $1 AND join_code = $2`,
+      [community.id, input.invite_code],
+    )
+    if (!joinMatch) throw badRequest('Invalid or expired invite code')
   }
 
   const existing = await query('SELECT id FROM users WHERE email = $1', [input.email])
@@ -567,6 +576,32 @@ export async function listCommunities() {
      ORDER  BY c.created_at DESC`,
   )
   return { communities: rows }
+}
+
+export async function getJoinCode(slug: string, requesterId: string) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+
+  const { rows: [row] } = await query<{ join_code: string }>(
+    `SELECT join_code FROM communities WHERE id = $1`,
+    [community.id],
+  )
+  return { join_code: row.join_code, community_slug: slug }
+}
+
+export async function resetJoinCode(slug: string, requesterId: string) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+
+  const { rows: [row] } = await query<{ join_code: string }>(
+    `UPDATE communities
+     SET join_code = encode(gen_random_bytes(10), 'hex'), updated_at = NOW()
+     WHERE id = $1
+     RETURNING join_code`,
+    [community.id],
+  )
+  logger.info({ communityId: community.id, requesterId }, 'community join_code reset')
+  return { join_code: row.join_code, community_slug: slug }
 }
 
 export async function listCommunityFamilies(slug: string, requesterId: string) {

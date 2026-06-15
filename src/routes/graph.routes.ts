@@ -48,24 +48,17 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
     if (rows[0]?.primary_family_id) {
       graphFamilyId = rows[0].primary_family_id
 
-      // Private families are only viewable by their own members.
+      // Access control for cross-family views.
+      // Community families are checked first — membership in the same community
+      // grants full access regardless of the family's visibility setting
+      // (community families default to 'private' which would otherwise block it).
       if (graphFamilyId !== userFamilyId) {
         const { rows: [fam] } = await query<{ visibility: string; community_id: string | null }>(
           `SELECT visibility, community_id FROM families WHERE id = $1`,
           [graphFamilyId],
         )
-        if (fam?.visibility === 'private') {
-          const { rows: [member] } = await query(
-            `SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2`,
-            [graphFamilyId, req.user.userId],
-          )
-          if (!member) {
-            res.status(403).json({ error: 'This family tree is private' })
-            return
-          }
-        }
-        // Community families: requester must be in the same community
         if (fam?.community_id) {
+          // Community family: requester must be in the same community.
           const { rows: [sameCommunity] } = await query(
             `SELECT 1 FROM families
              WHERE id = $1 AND community_id = (SELECT community_id FROM families WHERE id = $2)`,
@@ -73,6 +66,16 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
           )
           if (!sameCommunity) {
             res.status(403).json({ error: 'This family tree belongs to a different community' })
+            return
+          }
+        } else if (fam?.visibility === 'private') {
+          // Non-community private family: requester must be a member.
+          const { rows: [member] } = await query(
+            `SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2`,
+            [graphFamilyId, req.user.userId],
+          )
+          if (!member) {
+            res.status(403).json({ error: 'This family tree is private' })
             return
           }
         }
