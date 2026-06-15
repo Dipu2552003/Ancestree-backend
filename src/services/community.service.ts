@@ -266,21 +266,19 @@ export async function communitySignup(slug: string, input: CommunitySignupInput)
     }
   }
 
-  // An invite code is REQUIRED to join a community. This is a COMMUNITY invite
-  // (community_invites), wholly separate from the person-node invite token used
-  // by the /invite claim flow — the two are validated against different tables
-  // and never interchange.
-  if (!input.invite_code) {
-    throw badRequest('An invite code is required to join this community')
+  // Invite code is optional — communities allow open signup by default.
+  // If a code is provided, validate it so invite-specific tracking still works.
+  let inviteId: string | null = null
+  if (input.invite_code) {
+    const { rows: [invite] } = await query<{ id: string }>(
+      `SELECT id FROM community_invites
+       WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
+         AND  (expires_at IS NULL OR expires_at > NOW())`,
+      [input.invite_code, community.id],
+    )
+    if (!invite) throw badRequest('Invalid or expired invite code')
+    inviteId = invite.id
   }
-  const { rows: [invite] } = await query<{ id: string }>(
-    `SELECT id FROM community_invites
-     WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
-       AND  (expires_at IS NULL OR expires_at > NOW())`,
-    [input.invite_code, community.id],
-  )
-  if (!invite) throw badRequest('Invalid or expired invite code')
-  const inviteId = invite.id
 
   const existing = await query('SELECT id FROM users WHERE email = $1', [input.email])
   if ((existing.rowCount ?? 0) > 0) throw conflict('Email already registered')
@@ -333,10 +331,12 @@ export async function communitySignup(slug: string, input: CommunitySignupInput)
       [community.id, user.id],
     )
 
-    await tx.query(
-      `UPDATE community_invites SET used_by = $1, used_at = NOW() WHERE id = $2`,
-      [user.id, inviteId],
-    )
+    if (inviteId) {
+      await tx.query(
+        `UPDATE community_invites SET used_by = $1, used_at = NOW() WHERE id = $2`,
+        [user.id, inviteId],
+      )
+    }
 
     return { user, family, person }
   })
