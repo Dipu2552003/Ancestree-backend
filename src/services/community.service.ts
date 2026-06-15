@@ -387,20 +387,19 @@ export async function joinCommunity(
     }
   }
 
-  // An invite code is REQUIRED to join a community (a community_invites code —
-  // separate from the /invite person-node token flow).
-  if (!input.invite_code) {
-    throw badRequest('An invite code is required to join this community')
+  let inviteId: string | null = null
+  let inviteRole = 'member'
+  if (input.invite_code) {
+    const { rows: [invite] } = await query<{ id: string; role: string }>(
+      `SELECT id, role FROM community_invites
+       WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
+         AND  (expires_at IS NULL OR expires_at > NOW())`,
+      [input.invite_code, community.id],
+    )
+    if (!invite) throw badRequest('Invalid or expired invite code')
+    inviteId = invite.id
+    inviteRole = invite.role
   }
-  const { rows: [invite] } = await query<{ id: string; role: string }>(
-    `SELECT id, role FROM community_invites
-     WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
-       AND  (expires_at IS NULL OR expires_at > NOW())`,
-    [input.invite_code, community.id],
-  )
-  if (!invite) throw badRequest('Invalid or expired invite code')
-  const inviteId = invite.id
-  const inviteRole = invite.role
 
   const { rows: [user] } = await query<{ display_name: string }>(
     `SELECT display_name FROM users WHERE id = $1`,
@@ -444,10 +443,12 @@ export async function joinCommunity(
         [community.id, userId, inviteRole],
       )
 
-      await tx.query(
-        `UPDATE community_invites SET used_by = $1, used_at = NOW() WHERE id = $2`,
-        [userId, inviteId],
-      )
+      if (inviteId) {
+        await tx.query(
+          `UPDATE community_invites SET used_by = $1, used_at = NOW() WHERE id = $2`,
+          [userId, inviteId],
+        )
+      }
 
       return { family, person }
     },
