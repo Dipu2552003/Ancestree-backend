@@ -64,6 +64,8 @@ router.get('/:slug', asyncHandler(async (req: Request, res: Response) => {
 router.get('/:slug/invite/:code', asyncHandler(async (req: Request, res: Response) => {
   const slug = req.params['slug'] as string
   const code = req.params['code'] as string
+
+  // Try targeted single-use invite first.
   const { rows: [invite] } = await query<{
     community_name: string; community_slug: string
     role: string; invited_email: string | null
@@ -77,11 +79,22 @@ router.get('/:slug/invite/:code', asyncHandler(async (req: Request, res: Respons
        AND  (ci.expires_at IS NULL OR ci.expires_at > NOW())`,
     [code, slug],
   )
-  if (!invite) {
-    res.status(404).json({ error: 'Invalid or expired invite link' })
+  if (invite) {
+    res.json(invite)
     return
   }
-  res.json(invite)
+
+  // Fall back to the community's permanent join_code.
+  const { rows: [joinMatch] } = await query<{ name: string; slug: string }>(
+    `SELECT name, slug FROM communities WHERE slug = $1 AND join_code = $2`,
+    [slug, code],
+  )
+  if (joinMatch) {
+    res.json({ community_name: joinMatch.name, community_slug: joinMatch.slug, role: 'member', invited_email: null })
+    return
+  }
+
+  res.status(404).json({ error: 'Invalid or expired invite link' })
 }))
 
 // ── Community-scoped auth ─────────────────────────────────────────────────────
