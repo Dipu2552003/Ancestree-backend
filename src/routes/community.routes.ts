@@ -14,7 +14,7 @@ import {
   createCommunity, getCommunity, updateCommunity, deleteCommunity,
   communityLogin, communitySignup, joinCommunity, leaveCommunity,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
-  listCommunityFamilies, listCommunities,
+  listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
 } from '../services/community.service'
 import { searchPersons } from '../services/search.service'
 import { query } from '../utils/db'
@@ -169,6 +169,16 @@ router.delete('/:slug/members/:uid', requireAuth, asyncHandler(async (req: Reque
 }))
 
 // ── Admin views ───────────────────────────────────────────────────────────────
+
+router.get('/:slug/join-code', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await getJoinCode(req.params['slug'] as string, req.user.userId)
+  res.json(result)
+}))
+
+router.post('/:slug/join-code/reset', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await resetJoinCode(req.params['slug'] as string, req.user.userId)
+  res.json(result)
+}))
 
 router.get('/:slug/families', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const result = await listCommunityFamilies(req.params['slug'] as string, req.user.userId)

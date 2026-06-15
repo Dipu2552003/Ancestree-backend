@@ -265,7 +265,13 @@ export async function refreshToken(userId: string): Promise<{ token: string }> {
   )
   if (!member) throw serverError('No family found for user')
 
-  const token = signToken({ userId, familyId: member.family_id })
+  // Preserve community context in the refreshed token so community features
+  // remain functional after a merge-triggered refresh.
+  const { rows: [fam] } = await query<{ community_id: string | null }>(
+    `SELECT community_id FROM families WHERE id = $1`,
+    [member.family_id],
+  )
+  const token = signToken({ userId, familyId: member.family_id, communityId: fam?.community_id ?? undefined })
   return { token }
 }
 
