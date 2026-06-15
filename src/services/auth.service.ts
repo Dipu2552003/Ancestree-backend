@@ -171,9 +171,9 @@ export async function signupViaInvite(input: SignupInput & { invite_token: strin
   if ((existing.rowCount ?? 0) > 0) throw conflict('Email already registered')
 
   const { rows: [person] } = await query<{
-    id: string; primary_family_id: string; node_state: string
+    id: string; primary_family_id: string; node_state: string; community_id: string | null
   }>(
-    `SELECT id, primary_family_id, node_state FROM persons
+    `SELECT id, primary_family_id, node_state, community_id FROM persons
      WHERE invite_token = $1 AND deleted_at IS NULL`,
     [input.invite_token.toUpperCase()]
   )
@@ -206,6 +206,17 @@ export async function signupViaInvite(input: SignupInput & { invite_token: strin
       )
       await auditCreate(op, 'family_member', membership)
 
+      // Community node → also enrol the new user as a community member so their
+      // scope (search/visibility) is community, not public. Idempotent on PK.
+      if (person.community_id) {
+        await tx.query(
+          `INSERT INTO community_members (community_id, user_id, role)
+           VALUES ($1, $2, 'member')
+           ON CONFLICT (community_id, user_id) DO NOTHING`,
+          [person.community_id, user.id],
+        )
+      }
+
       await captureAndUpdate(op, 'user',
         { sql: 'id = $1', params: [user.id] },
         { sql: 'person_id = $1', params: [person.id] },
@@ -216,8 +227,12 @@ export async function signupViaInvite(input: SignupInput & { invite_token: strin
     },
   )
 
-  logger.info({ userId: user.id, personId: person.id, familyId: person.primary_family_id }, 'signup via invite')
-  const token = signToken({ userId: user.id, familyId: person.primary_family_id })
+  logger.info({ userId: user.id, personId: person.id, familyId: person.primary_family_id, communityId: person.community_id }, 'signup via invite')
+  const token = signToken({
+    userId: user.id,
+    familyId: person.primary_family_id,
+    communityId: person.community_id ?? null,
+  })
   return { token, user: { ...user, person_id: person.id, family_id: person.primary_family_id } }
 }
 

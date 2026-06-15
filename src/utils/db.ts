@@ -4,8 +4,13 @@ import { logger } from './logger'
 
 dotenv.config()
 
+// Managed Postgres (Neon, Render, Supabase) requires TLS; Railway's private
+// network does not. Set DATABASE_SSL=require on hosts that need it.
+const ssl = process.env.DATABASE_SSL === 'require' ? { rejectUnauthorized: false } : false
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
+  ssl,
   max: 10,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 5_000,

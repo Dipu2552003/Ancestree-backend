@@ -2,6 +2,7 @@
 // Pure SQL candidate fetch + in-process scoring; no mutations.
 
 import { query } from '../../utils/db'
+import { resolveCallerScope } from '../search.service'
 import type { SearchInput, PotentialMatch } from './types'
 
 interface DBCandidate {
@@ -72,6 +73,13 @@ export async function searchDuplicates(
   input: SearchInput,
   callerFamilyId: string,
 ): Promise<PotentialMatch[]> {
+  // Duplicate suggestions must respect the caller's family-type boundary so a
+  // match in a different community / private tree is never surfaced.
+  const caller = await resolveCallerScope(callerFamilyId, null)
+  // A private tree is searchable only within itself, and duplicate discovery is
+  // cross-family by definition — so a private family has no candidates to match.
+  if (caller.kind === 'private') return []
+
   // Build OR conditions dynamically based on available fields
   const orConditions: string[] = []
   const params: (string | number)[] = [callerFamilyId]
@@ -89,6 +97,13 @@ export async function searchDuplicates(
     orConditions.push(`(p.last_name IS NOT NULL AND LOWER(p.last_name) = LOWER($${idx++}))`)
     params.push(input.lastName.trim())
   }
+
+  // Family-type boundary clause (community → same community; public → public only)
+  const boundary =
+    caller.kind === 'community'
+      ? `AND p.community_id = $${idx}`
+      : `AND p.community_id IS NULL AND f.visibility = 'public'`
+  if (caller.kind === 'community') params.push(caller.communityId)
 
   const { rows } = await query<DBCandidate>(
     `SELECT p.id, p.full_name, p.first_name, p.last_name,
@@ -112,6 +127,7 @@ export async function searchDuplicates(
      WHERE  p.deleted_at        IS NULL
        AND  p.primary_family_id != $1
        AND  f.deleted_at        IS NULL
+       ${boundary}
        AND  (${orConditions.join(' OR ')})
      LIMIT  30`,
     params,

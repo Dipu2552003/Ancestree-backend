@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express'
-import { requireAuth } from '../middleware/auth'
+import { requireAuth, optionalAuth } from '../middleware/auth'
 import { asyncHandler } from '../middleware/asyncHandler'
 import { validate } from '../middleware/validate'
 import {
@@ -14,32 +14,39 @@ import {
   createCommunity, getCommunity, updateCommunity, deleteCommunity,
   communityLogin, communitySignup, joinCommunity, leaveCommunity,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
-  listCommunityFamilies,
+  listCommunityFamilies, listCommunities,
 } from '../services/community.service'
 import { searchPersons } from '../services/search.service'
 import { query } from '../utils/db'
 
 const router = Router()
 
+// ── Public community listing ──────────────────────────────────────────────────
+
+router.get('/', asyncHandler(async (_req: Request, res: Response) => {
+  const result = await listCommunities()
+  res.json(result)
+}))
+
 // ── Platform-admin only: create / delete community ────────────────────────────
 
-router.post('/', requireAuth, validate(createCommunitySchema), asyncHandler(async (req: Request, res: Response) => {
+router.post('/', validate(createCommunitySchema), asyncHandler(async (req: Request, res: Response) => {
   const key = req.headers['x-platform-key']
   if (!key || key !== process.env.PLATFORM_ADMIN_KEY) {
-    res.status(401).json({ error: 'Platform admin key required' })
+    res.status(401).json({ error: 'Invalid platform admin key. Set PLATFORM_ADMIN_KEY in backend .env and enter the same value here.' })
     return
   }
-  const result = await createCommunity(req.validated as CreateCommunityInput, req.user.userId)
+  const result = await createCommunity(req.validated as CreateCommunityInput)
   res.status(201).json(result)
 }))
 
-router.delete('/:slug', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+router.delete('/:slug', optionalAuth, asyncHandler(async (req: Request, res: Response) => {
   const key = req.headers['x-platform-key']
   if (!key || key !== process.env.PLATFORM_ADMIN_KEY) {
-    res.status(401).json({ error: 'Platform admin key required' })
+    res.status(401).json({ error: 'Invalid platform admin key. Set PLATFORM_ADMIN_KEY in backend .env and enter the same value here.' })
     return
   }
-  const result = await deleteCommunity(req.params['slug'] as string, req.user.userId)
+  const result = await deleteCommunity(req.params['slug'] as string, req.user?.userId ?? null)
   res.json(result)
 }))
 

@@ -21,7 +21,11 @@ router.post('/claim', requireAuth, asyncHandler(async (req: Request, res: Respon
   const { token } = req.body as { token?: string }
   if (!token) throw badRequest('token is required')
   const result = await claimByToken(token, req.user.userId)
-  const newToken = signToken({ userId: req.user.userId, familyId: result.family_id })
+  const newToken = signToken({
+    userId: req.user.userId,
+    familyId: result.family_id,
+    communityId: result.community_id ?? null,
+  })
   res.json({ ...result, token: newToken })
 }))
 

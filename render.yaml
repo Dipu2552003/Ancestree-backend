@@ -1,0 +1,42 @@
+# Render Blueprint for the Ancestree API (free tier) + external Neon Postgres.
+# Deploy: push to Git, then in Render → New → Blueprint, point at this repo.
+# Render auto-detects this file. Set the `sync: false` vars in the dashboard.
+#
+# CHOSEN FREE STACK: Render free web service (compute) + Neon free Postgres (data).
+# The database is NOT created here — paste your Neon connection string into the
+# DATABASE_URL dashboard var (sync: false). Render's own free Postgres is avoided
+# because it expires after ~90 days; Neon's free tier is permanent.
+
+services:
+  - type: web
+    name: ancestree-api
+    runtime: node
+    region: oregon              # keep API near your Neon region to cut latency
+    plan: free                  # FREE: sleeps after ~15 min idle (~50s cold start).
+                                # Keep PROD warm with an UptimeRobot ping to /health
+                                # every ~10 min; let the dev service sleep.
+    rootDir: backend
+    # devDeps (typescript/ts-node) are needed to build, so force-include them:
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health    # Render uses this for zero-downtime deploys
+    autoDeploy: true
+    envVars:
+      # NOTE: do NOT set PORT — Render injects it and the app reads process.env.PORT
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: DATABASE_SSL
+        value: require           # Neon requires TLS (code uses rejectUnauthorized:false)
+      - key: JWT_SECRET
+        generateValue: true      # Render generates a strong secret for you
+      - key: PLATFORM_ADMIN_KEY
+        generateValue: true
+      - key: FRONTEND_URL
+        sync: false              # set in dashboard: https://app.DOMAIN,https://3d.DOMAIN
+      - key: DATABASE_URL
+        sync: false              # paste your Neon POOLED connection string here
+
+# No `databases:` block — the DB lives on Neon (free, permanent). See
+# docs/DATABASE_DEPLOYMENT.md for the step-by-step Neon setup.

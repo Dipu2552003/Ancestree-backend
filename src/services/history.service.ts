@@ -9,7 +9,7 @@
 
 import { query } from '../utils/db'
 import {
-  withOperation, writeAudit, captureAndDelete, ENTITY_TABLES,
+  withOperation, writeAudit, captureAndDelete, captureAndUpdate, ENTITY_TABLES,
   type EntityType, type OperationContext, type Snapshot,
 } from '../utils/audit'
 import { logger } from '../utils/logger'
@@ -39,6 +39,65 @@ function assertIdent(name: string): void {
 
 // ── Revert primitives ─────────────────────────────────────────────────────────
 
+/**
+ * A person row is the target of several NON-cascading foreign keys. Undoing a
+ * `person.create` hard-deletes the person, but the links to that person were
+ * added by *separate* operations (the add-relation wizard, the merge-from-search
+ * flow, duplicate-match notifications), so they are still present and Postgres
+ * rejects the DELETE unless we clear them first.
+ *
+ *   relationships.from/to_person_id        — links to parents/children/spouses
+ *   merge_records.canonical/merged_person_id — a merge proxy's pending request
+ *   notifications.merge_record_id          — FK to those merge_records
+ *   notifications.related_person_id        — possible-match notifications
+ *   families.head_person_id                — derived pointer, recomputed anyway
+ *
+ * relationships, merge_records and the family-head reset are captured + audited
+ * under the undo operation. notifications are derived side-effects and are not
+ * audited (see utils/audit.ts header), so they are removed with a plain DELETE.
+ */
+async function clearPersonReferences(
+  op: OperationContext,
+  personId: string,
+  familyId: string | null,
+): Promise<void> {
+  // 1. Relationships touching the person in either direction.
+  await captureAndDelete(op, 'relationship', {
+    sql: 'from_person_id = $1 OR to_person_id = $1',
+    params: [personId],
+  }, { familyId })
+
+  // 2. Merge records referencing the person — their notifications must go first
+  //    (notifications.merge_record_id is a non-cascading FK).
+  const { rows: mergeRecords } = await op.tx.query<{ id: string }>(
+    `SELECT id FROM merge_records WHERE canonical_person_id = $1 OR merged_person_id = $1`,
+    [personId],
+  )
+  if (mergeRecords.length > 0) {
+    await op.tx.query(
+      `DELETE FROM notifications WHERE merge_record_id = ANY($1::uuid[])`,
+      [mergeRecords.map(r => r.id)],
+    )
+    await captureAndDelete(op, 'merge_record', {
+      sql: 'canonical_person_id = $1 OR merged_person_id = $1',
+      params: [personId],
+    }, { familyId })
+  }
+
+  // 3. Possible-match notifications pointing straight at the person.
+  await op.tx.query(
+    `DELETE FROM notifications WHERE related_person_id = $1`,
+    [personId],
+  )
+
+  // 4. Family head pointer — derived (recomputed after merges); null it if it
+  //    happened to reference this person so the delete (and commit) succeed.
+  await captureAndUpdate(op, 'family',
+    { sql: 'head_person_id = $1', params: [personId] },
+    { sql: 'head_person_id = NULL' },
+  )
+}
+
 /** Undo a 'create': delete the row that the operation inserted. */
 async function revertCreate(op: OperationContext, row: AuditRow): Promise<void> {
   const snapshot = row.after_state as Snapshot
@@ -48,6 +107,12 @@ async function revertCreate(op: OperationContext, row: AuditRow): Promise<void> 
       params: [snapshot.family_id, snapshot.user_id],
     }, { familyId: row.family_id })
     return
+  }
+  // A person is referenced by non-cascading FKs — clear them before the hard
+  // delete below, or Postgres rejects it. (Only person.create reaches here with
+  // a person; merge/delete undos revert persons via revertUpdate instead.)
+  if (row.entity_type === 'person') {
+    await clearPersonReferences(op, row.entity_id, row.family_id)
   }
   await captureAndDelete(op, row.entity_type as Exclude<EntityType, 'operation'>, {
     sql: 'id = $1',

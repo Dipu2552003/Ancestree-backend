@@ -6,6 +6,11 @@ export const createCommunitySchema = z.object({
                   .regex(/^[a-z0-9-]+$/, 'Slug must be lowercase letters, numbers, or dashes only'),
   description:  z.string().max(500).optional(),
   member_limit: z.number().int().min(0).default(0),
+  owner: z.object({
+    email:        z.string().email(),
+    password:     z.string().min(8, 'Password must be at least 8 characters'),
+    display_name: z.string().min(1).max(100),
+  }),
 })
 
 export const communityLoginSchema = z.object({

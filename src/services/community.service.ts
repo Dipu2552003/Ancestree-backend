@@ -55,24 +55,78 @@ async function uniquePrefix(base: string): Promise<string> {
 
 // ── Public API ─────────────────────────────────────────────────────────────────
 
-export async function createCommunity(input: CreateCommunityInput, ownerId: string) {
+export async function createCommunity(input: CreateCommunityInput) {
   const { rows: [existing] } = await query('SELECT id FROM communities WHERE slug = $1', [input.slug])
   if (existing) throw conflict('A community with this slug already exists')
 
-  const { rows: [community] } = await query<{ id: string; name: string; slug: string }>(
-    `INSERT INTO communities (name, slug, description, owner_id, member_limit)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, name, slug`,
-    [input.name, input.slug, input.description ?? null, ownerId, input.member_limit ?? 0],
-  )
+  const { rows: [existingUser] } = await query('SELECT id FROM users WHERE email = $1', [input.owner.email])
+  if (existingUser) throw conflict('Email already registered')
 
-  await query(
-    `INSERT INTO community_members (community_id, user_id, role) VALUES ($1, $2, 'owner')`,
-    [community.id, ownerId],
-  )
+  const passwordHash = await bcrypt.hash(input.owner.password, 10)
+  const namePrefix = await uniquePrefix(buildNamePrefix(input.owner.display_name))
 
-  logger.info({ communityId: community.id, slug: input.slug, ownerId }, 'community created')
-  return community
+  const { user, community, family, person } = await withOperation({ action: 'community.create' }, async op => {
+    const tx = op.tx
+
+    const { rows: [user] } = await tx.query<{ id: string; email: string; display_name: string }>(
+      `INSERT INTO users (email, display_name, password_hash)
+       VALUES ($1, $2, $3) RETURNING id, email, display_name`,
+      [input.owner.email, input.owner.display_name, passwordHash],
+    )
+    op.actorId = user.id
+
+    const { rows: [community] } = await tx.query<{ id: string; name: string; slug: string }>(
+      `INSERT INTO communities (name, slug, description, owner_id, member_limit)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, name, slug`,
+      [input.name, input.slug, input.description ?? null, user.id, input.member_limit ?? 0],
+    )
+
+    const { rows: [family] } = await tx.query<Snapshot & { id: string }>(
+      `INSERT INTO families (name, name_prefix, created_by, community_id)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [`${input.owner.display_name}'s Family`, namePrefix, user.id, community.id],
+    )
+    op.familyId = family.id
+    await auditCreate(op, 'family', family)
+
+    const { rows: [membership] } = await tx.query<Snapshot>(
+      `INSERT INTO family_members (family_id, user_id, role) VALUES ($1, $2, 'admin') RETURNING *`,
+      [family.id, user.id],
+    )
+    await auditCreate(op, 'family_member', membership)
+
+    const personCode = `${namePrefix}-001`
+    const { rows: [person] } = await tx.query<Snapshot & { id: string }>(
+      `INSERT INTO persons
+         (person_code, primary_family_id, full_name, node_state, claimed_by, created_by,
+          visibility, community_id)
+       VALUES ($1, $2, $3, 'claimed', $4, $4, 'community', $5) RETURNING *`,
+      [personCode, family.id, input.owner.display_name, user.id, community.id],
+    )
+    await auditCreate(op, 'person', person)
+
+    await captureAndUpdate(op, 'user',
+      { sql: 'id = $1', params: [user.id] },
+      { sql: 'person_id = $1', params: [person.id] },
+      { snapshotCols: 'id, person_id' },
+    )
+
+    await tx.query(
+      `INSERT INTO community_members (community_id, user_id, role) VALUES ($1, $2, 'owner')`,
+      [community.id, user.id],
+    )
+
+    return { user, community, family, person }
+  })
+
+  const token = signToken({ userId: user.id, familyId: family.id, communityId: community.id })
+  logger.info({ communityId: community.id, slug: input.slug, ownerId: user.id }, 'community created')
+  return {
+    token,
+    community: { id: community.id, name: community.name, slug: community.slug },
+    user: { id: user.id, email: user.email, display_name: user.display_name, person_id: person.id, family_id: family.id, community_id: community.id },
+  }
 }
 
 export async function getCommunity(slug: string): Promise<CommunityPublic> {
@@ -128,10 +182,13 @@ export async function updateCommunity(
   return updated
 }
 
-export async function deleteCommunity(slug: string, requesterId: string) {
+export async function deleteCommunity(slug: string, requesterId: string | null) {
   const community = await getBySlug(slug)
 
-  if (community.owner_id !== requesterId) {
+  // Platform-admin-created communities (no owner) can only be deleted via admin key
+  // (which is already verified in the route before this service is called).
+  // User-owned communities additionally require the requester to be the owner.
+  if (community.owner_id && community.owner_id !== requesterId) {
     throw forbidden('Only the community owner can delete it')
   }
 
@@ -209,18 +266,21 @@ export async function communitySignup(slug: string, input: CommunitySignupInput)
     }
   }
 
-  // Validate invite code if provided
-  let inviteId: string | null = null
-  if (input.invite_code) {
-    const { rows: [invite] } = await query<{ id: string }>(
-      `SELECT id FROM community_invites
-       WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
-         AND  (expires_at IS NULL OR expires_at > NOW())`,
-      [input.invite_code, community.id],
-    )
-    if (!invite) throw badRequest('Invalid or expired invite code')
-    inviteId = invite.id
+  // An invite code is REQUIRED to join a community. This is a COMMUNITY invite
+  // (community_invites), wholly separate from the person-node invite token used
+  // by the /invite claim flow — the two are validated against different tables
+  // and never interchange.
+  if (!input.invite_code) {
+    throw badRequest('An invite code is required to join this community')
   }
+  const { rows: [invite] } = await query<{ id: string }>(
+    `SELECT id FROM community_invites
+     WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
+       AND  (expires_at IS NULL OR expires_at > NOW())`,
+    [input.invite_code, community.id],
+  )
+  if (!invite) throw badRequest('Invalid or expired invite code')
+  const inviteId = invite.id
 
   const existing = await query('SELECT id FROM users WHERE email = $1', [input.email])
   if ((existing.rowCount ?? 0) > 0) throw conflict('Email already registered')
@@ -273,12 +333,10 @@ export async function communitySignup(slug: string, input: CommunitySignupInput)
       [community.id, user.id],
     )
 
-    if (inviteId) {
-      await tx.query(
-        `UPDATE community_invites SET used_by = $1, used_at = NOW() WHERE id = $2`,
-        [user.id, inviteId],
-      )
-    }
+    await tx.query(
+      `UPDATE community_invites SET used_by = $1, used_at = NOW() WHERE id = $2`,
+      [user.id, inviteId],
+    )
 
     return { user, family, person }
   })
@@ -329,20 +387,20 @@ export async function joinCommunity(
     }
   }
 
-  // Validate invite code — required to join
-  let inviteId: string | null = null
-  let inviteRole = 'member'
-  if (input.invite_code) {
-    const { rows: [invite] } = await query<{ id: string; role: string }>(
-      `SELECT id, role FROM community_invites
-       WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
-         AND  (expires_at IS NULL OR expires_at > NOW())`,
-      [input.invite_code, community.id],
-    )
-    if (!invite) throw badRequest('Invalid or expired invite code')
-    inviteId = invite.id
-    inviteRole = invite.role
+  // An invite code is REQUIRED to join a community (a community_invites code —
+  // separate from the /invite person-node token flow).
+  if (!input.invite_code) {
+    throw badRequest('An invite code is required to join this community')
   }
+  const { rows: [invite] } = await query<{ id: string; role: string }>(
+    `SELECT id, role FROM community_invites
+     WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
+       AND  (expires_at IS NULL OR expires_at > NOW())`,
+    [input.invite_code, community.id],
+  )
+  if (!invite) throw badRequest('Invalid or expired invite code')
+  const inviteId = invite.id
+  const inviteRole = invite.role
 
   const { rows: [user] } = await query<{ display_name: string }>(
     `SELECT display_name FROM users WHERE id = $1`,
@@ -386,12 +444,10 @@ export async function joinCommunity(
         [community.id, userId, inviteRole],
       )
 
-      if (inviteId) {
-        await tx.query(
-          `UPDATE community_invites SET used_by = $1, used_at = NOW() WHERE id = $2`,
-          [userId, inviteId],
-        )
-      }
+      await tx.query(
+        `UPDATE community_invites SET used_by = $1, used_at = NOW() WHERE id = $2`,
+        [userId, inviteId],
+      )
 
       return { family, person }
     },
@@ -499,6 +555,18 @@ export async function removeMember(slug: string, targetUserId: string, requester
 
   logger.info({ communityId: community.id, targetUserId, requesterId }, 'community member removed')
   return { success: true }
+}
+
+export async function listCommunities() {
+  const { rows } = await query<CommunityPublic>(
+    `SELECT c.id, c.name, c.slug, c.description, c.owner_id, c.member_limit,
+            COUNT(cm.user_id)::int AS member_count
+     FROM   communities c
+     LEFT   JOIN community_members cm ON cm.community_id = c.id
+     GROUP  BY c.id
+     ORDER  BY c.created_at DESC`,
+  )
+  return { communities: rows }
 }
 
 export async function listCommunityFamilies(slug: string, requesterId: string) {

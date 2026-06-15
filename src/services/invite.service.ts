@@ -1,16 +1,30 @@
 import { query } from '../utils/db'
 import { withOperation } from '../utils/audit'
 import { logger } from '../utils/logger'
-import { notFound, conflict } from '../utils/errors'
+import { notFound, conflict, unauthorized } from '../utils/errors'
 import * as personsRepo from '../repositories/persons.repo'
 import * as familyMembersRepo from '../repositories/familyMembers.repo'
 
 export async function claimByToken(token: string, userId: string) {
+  // The JWT can outlive the user row it references (e.g. after a database
+  // reset/restore), leaving a syntactically valid token whose userId no longer
+  // exists. Claiming would then violate persons.claimed_by_fkey and surface as a
+  // confusing 500. Fail fast with a clean 401 so the client re-authenticates.
+  const { rows: [actor] } = await query<{ id: string }>(
+    `SELECT id FROM users WHERE id = $1`,
+    [userId],
+  )
+  if (!actor) {
+    logger.warn({ userId }, 'claimByToken: token references a missing user')
+    throw unauthorized('Your session is no longer valid — please sign in again')
+  }
+
   const { rows: [person] } = await query<{
     id: string; full_name: string; node_state: string
     claimed_by: string | null; primary_family_id: string; is_alive: boolean
+    community_id: string | null
   }>(
-    `SELECT id, full_name, node_state, claimed_by, primary_family_id, is_alive
+    `SELECT id, full_name, node_state, claimed_by, primary_family_id, is_alive, community_id
      FROM persons WHERE invite_token = $1 AND deleted_at IS NULL`,
     [token.toUpperCase()]
   )
@@ -34,11 +48,28 @@ export async function claimByToken(token: string, userId: string) {
       if (!alreadyMember) {
         await familyMembersRepo.insert(person.primary_family_id, userId, 'member', op)
       }
+      // The claimed node lives in a community family — make the claimer a full
+      // community member too, so they get community scope (search/visibility),
+      // not just family membership. Idempotent on the (community_id, user_id) PK.
+      if (person.community_id) {
+        await op.tx.query(
+          `INSERT INTO community_members (community_id, user_id, role)
+           VALUES ($1, $2, 'member')
+           ON CONFLICT (community_id, user_id) DO NOTHING`,
+          [person.community_id, userId],
+        )
+      }
     },
   )
 
-  logger.info({ personId: person.id, userId, familyId: person.primary_family_id }, 'invite claimed')
-  return { success: true, person_id: person.id, family_id: person.primary_family_id, full_name: person.full_name }
+  logger.info({ personId: person.id, userId, familyId: person.primary_family_id, communityId: person.community_id }, 'invite claimed')
+  return {
+    success: true,
+    person_id: person.id,
+    family_id: person.primary_family_id,
+    community_id: person.community_id,
+    full_name: person.full_name,
+  }
 }
 
 export async function lookupToken(token: string) {

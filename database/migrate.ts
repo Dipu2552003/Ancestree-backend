@@ -11,7 +11,10 @@ const migrationsDir = path.join(__dirname, 'migrations')
 const ALREADY_EXISTS = new Set(['42P07', '42701', '42710'])
 
 export async function runMigrations(connectionString: string): Promise<void> {
-  const client = new Client({ connectionString })
+  // Mirror the pool's TLS setting — managed Postgres needs it, Railway's
+  // private network does not (see src/utils/db.ts).
+  const ssl = process.env.DATABASE_SSL === 'require' ? { rejectUnauthorized: false } : false
+  const client = new Client({ connectionString, ssl })
   await client.connect()
 
   try {

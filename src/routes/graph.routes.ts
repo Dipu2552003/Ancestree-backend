@@ -1,10 +1,24 @@
 import { Router, Request, Response } from 'express'
 import { requireAuth } from '../middleware/auth'
 import { asyncHandler } from '../middleware/asyncHandler'
-import { fetchFamilyGraph } from '../services/graph.service'
+import { fetchFamilyGraph, fetchPublicFamilyGraph } from '../services/graph.service'
 import { query } from '../utils/db'
 
 const router = Router()
+
+// Public, unauthenticated — read-only tree view for the landing-page search.
+// Registered before requireAuth so guests can view a PUBLIC person's family
+// tree; private/community trees are rejected inside the service.
+router.get('/public', asyncHandler(async (req: Request, res: Response) => {
+  const perspective = typeof req.query.perspective === 'string' ? req.query.perspective : ''
+  if (!perspective) {
+    res.status(400).json({ error: 'perspective is required' })
+    return
+  }
+  const graph = await fetchPublicFamilyGraph(perspective)
+  res.json(graph)
+}))
+
 router.use(requireAuth)
 
 // Bounded so a malformed client can't force a multi-thousand-generation BFS.

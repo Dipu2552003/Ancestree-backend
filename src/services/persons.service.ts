@@ -206,8 +206,11 @@ export async function updatePerson(
 export async function generateInviteToken(id: string, userId: string, familyId: string) {
   const person = await getPersonById(id, familyId)
 
-  if (person.node_state !== 'proxy') {
-    throw badRequest('Only proxy nodes can be invited')
+  // 'invited' is allowed too, so a fresh code can be re-issued when the original
+  // is lost — and after an invite expires back to 'proxy' it can be sent again.
+  // Only a 'claimed' node (already owned) can't be invited.
+  if (person.node_state !== 'proxy' && person.node_state !== 'invited') {
+    throw badRequest('Only unclaimed nodes can be invited')
   }
   if (!person.is_alive) {
     throw badRequest('Cannot invite a deceased person')

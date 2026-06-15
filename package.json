@@ -5,7 +5,8 @@
   "scripts": {
     "migrate": "ts-node database/migrate.ts",
     "dev": "ts-node src/index.ts",
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-sql.js",
+    "start": "node dist/src/index.js",
     "verify:recovery": "ts-node database/verifyRecovery.ts"
   },
   "dependencies": {
@@ -16,6 +17,7 @@
     "cors": "^2.8.6",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
     "pg": "^8.13.3",

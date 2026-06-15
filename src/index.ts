@@ -25,6 +25,11 @@ dotenv.config()
 const app = express()
 const PORT = process.env.PORT ?? 4000
 
+// On Render/Railway/Vercel the app sits behind a reverse proxy, so the real
+// client IP arrives in the X-Forwarded-For header. Trust the first proxy hop so
+// rate limiting (and request logging) key off the real IP, not the proxy's.
+app.set('trust proxy', 1)
+
 app.use(helmet())
 const allowedOrigins = (process.env.FRONTEND_URL ?? 'http://localhost:3000,http://localhost:5173')
   .split(',').map(o => o.trim())

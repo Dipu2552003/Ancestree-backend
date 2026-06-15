@@ -1,5 +1,48 @@
 import { query } from '../utils/db'
 import { logger } from '../utils/logger'
+import { notFound } from '../utils/errors'
+
+// A syntactically valid UUID that matches no real user/family. Passed as the
+// "viewer" identity for the public, unauthenticated tree view so every node is
+// resolved as read-only (no membership, nothing claimed by the viewer) without
+// breaking the uuid-typed family_members lookup inside fetchFamilyGraph().
+const NIL_UUID = '00000000-0000-0000-0000-000000000000'
+
+// Node-data fields stripped from every node before the graph is served to an
+// unauthenticated visitor — contact details and precise dates/address are never
+// exposed publicly. Names, photos, places, and relationships stay visible.
+const PUBLIC_REDACTED_FIELDS = [
+  'phone', 'whatsapp', 'email',
+  'currentAddress', 'currentPincode',
+  'birthDate', 'deathDate',
+] as const
+
+// An invite that is never claimed shouldn't pin a node in the 'invited' state
+// forever. After this many days the node reverts to 'proxy' (its token cleared)
+// so it can be re-invited cleanly. Expiry is applied lazily whenever the family
+// graph is fetched — see expireStaleInvites().
+const INVITE_EXPIRY_DAYS = 7
+
+/**
+ * Revert any of this family's invites that have gone stale: 'invited' nodes
+ * whose invite is older than INVITE_EXPIRY_DAYS and were never claimed go back
+ * to 'proxy' with their token cleared. This is a system maintenance transition
+ * (not a user action), so it is intentionally NOT audited.
+ */
+async function expireStaleInvites(familyId: string): Promise<void> {
+  const { rowCount } = await query(
+    `UPDATE persons
+     SET    node_state = 'proxy', invite_token = NULL, updated_at = NOW()
+     WHERE  primary_family_id = $1
+       AND  node_state        = 'invited'
+       AND  invite_sent_at IS NOT NULL
+       AND  invite_sent_at  < NOW() - make_interval(days => $2)`,
+    [familyId, INVITE_EXPIRY_DAYS],
+  )
+  if (rowCount && rowCount > 0) {
+    logger.info({ familyId, expired: rowCount }, 'reverted stale invites to proxy')
+  }
+}
 
 
 interface DBPerson {
@@ -171,6 +214,10 @@ export async function fetchFamilyGraph(
   ancestorDepth: number = 10,
   descendantDepth: number = 10,
 ) {
+  // Lazily revert any of this family's expired invites before reading the graph,
+  // so the returned node_state / canInvite reflect the reverted 'proxy' status.
+  await expireStaleInvites(familyId)
+
   const [{ rows: persons }, { rows: rels }, { rows: [membership] }] = await Promise.all([
     query<DBPerson>(
       // Fetch this family's own persons PLUS any cross-family persons that are
@@ -277,7 +324,7 @@ export async function fetchFamilyGraph(
       // only disconnect (remove relationships). Proxy/invited nodes can be
       // deleted freely by any family member, except the viewer's own node.
       canDelete:          p.primary_family_id === userFamilyId && p.node_state !== 'claimed',
-      canInvite:          p.primary_family_id === userFamilyId && p.node_state === 'proxy' && p.is_alive,
+      canInvite:          p.primary_family_id === userFamilyId && (p.node_state === 'proxy' || p.node_state === 'invited') && p.is_alive,
       firstName:          p.first_name,
       middleName:         p.middle_name,
       lastName:           p.last_name,
@@ -335,4 +382,43 @@ export async function fetchFamilyGraph(
       hasMoreDescendants,
     },
   }
+}
+
+/**
+ * Read-only family graph for the public landing-page viewer (no auth).
+ *
+ * Only persons in a PUBLIC, non-community family are viewable — private and
+ * community trees throw notFound. Relationship labels are computed relative to
+ * the focal (searched) person, and sensitive fields are stripped from every
+ * node. The viewer identity is a nil UUID, so fetchFamilyGraph() resolves every
+ * node as read-only (canEdit/canDelete/canInvite false, nothing claimed by the
+ * viewer). Large depths are requested so the whole public tree is returned with
+ * no "Load more" paging on the public page.
+ */
+export async function fetchPublicFamilyGraph(perspectivePersonId: string) {
+  const { rows: [person] } = await query<{ visibility: string; community_id: string | null; primary_family_id: string }>(
+    `SELECT p.primary_family_id, f.visibility, f.community_id
+     FROM   persons p
+     JOIN   families f ON f.id = p.primary_family_id AND f.deleted_at IS NULL
+     WHERE  p.id = $1 AND p.deleted_at IS NULL`,
+    [perspectivePersonId],
+  )
+  if (!person) throw notFound('Person not found')
+  if (person.community_id || person.visibility !== 'public') {
+    // Don't leak whether a private/community person exists — same error as missing.
+    throw notFound('This profile is not public')
+  }
+
+  const graph = await fetchFamilyGraph(
+    person.primary_family_id, NIL_UUID, NIL_UUID, perspectivePersonId, 100, 100,
+  )
+
+  const nodes = graph.nodes.map(n => {
+    const data = { ...(n.data as Record<string, unknown>) }
+    for (const f of PUBLIC_REDACTED_FIELDS) data[f] = null
+    return { ...n, data }
+  })
+
+  logger.debug({ perspectivePersonId, nodes: nodes.length }, 'public graph fetched')
+  return { ...graph, nodes }
 }

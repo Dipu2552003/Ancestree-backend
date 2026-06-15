@@ -14,20 +14,21 @@ import {
 import { requireAuth } from '../middleware/auth'
 import { asyncHandler } from '../middleware/asyncHandler'
 import { validate } from '../middleware/validate'
+import { authLimiter, signupLimiter } from '../middleware/rateLimit'
 
 const router = Router()
 
-router.post('/signup', validate(signupSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post('/signup', signupLimiter, validate(signupSchema), asyncHandler(async (req: Request, res: Response) => {
   const result = await signup(req.validated as SignupInput)
   res.status(201).json(result)
 }))
 
-router.post('/check-email', validate(checkEmailSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post('/check-email', signupLimiter, validate(checkEmailSchema), asyncHandler(async (req: Request, res: Response) => {
   const result = await checkEmail(req.validated as CheckEmailInput)
   res.json(result)
 }))
 
-router.post('/login', validate(loginSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post('/login', authLimiter, validate(loginSchema), asyncHandler(async (req: Request, res: Response) => {
   const result = await login(req.validated as LoginInput)
   res.json(result)
 }))
@@ -57,13 +58,13 @@ router.patch('/password', requireAuth, validate(changePasswordSchema), asyncHand
 
 /** POST /api/auth/forgot-password — start the reset flow. Always responds 200 to
  *  avoid leaking which emails are registered. */
-router.post('/forgot-password', validate(forgotPasswordSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post('/forgot-password', authLimiter, validate(forgotPasswordSchema), asyncHandler(async (req: Request, res: Response) => {
   const result = await requestPasswordReset(req.validated as ForgotPasswordInput)
   res.json(result)
 }))
 
 /** POST /api/auth/reset-password — complete the reset flow with the emailed token */
-router.post('/reset-password', validate(resetPasswordSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post('/reset-password', authLimiter, validate(resetPasswordSchema), asyncHandler(async (req: Request, res: Response) => {
   const result = await resetPassword(req.validated as ResetPasswordInput)
   res.json(result)
 }))
