@@ -34,9 +34,15 @@ app.use(helmet())
 const allowedOrigins = (process.env.FRONTEND_URL ?? 'http://localhost:3000,http://localhost:5173')
   .split(',').map(o => o.trim())
 
+// CORS_PATTERN accepts a regex string (e.g. \.vercel\.app$) to allow dynamic
+// preview URLs (Vercel preview deployments) without listing every one explicitly.
+const corsPattern = process.env.CORS_PATTERN ? new RegExp(process.env.CORS_PATTERN) : null
+
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true)
+    if (!origin) return cb(null, true)
+    if (allowedOrigins.includes(origin)) return cb(null, true)
+    if (corsPattern?.test(origin)) return cb(null, true)
     cb(new Error(`CORS: origin ${origin} not allowed`))
   },
   credentials: true,
