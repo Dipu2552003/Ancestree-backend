@@ -159,13 +159,13 @@ export async function captureAndUpdate(
   if (before.length === 0) return { before: [], after: [] }
 
   const setParams = set.params ?? []
-  const ids = before.map(r => r.id)
+  const ids = before.map((r: Snapshot) => r.id)
   const { rows: after } = await op.tx.query<Snapshot>(
     `UPDATE ${table} SET ${set.sql} WHERE id = ANY($${setParams.length + 1}::uuid[]) RETURNING ${cols}`,
     [...setParams, ids],
   )
 
-  const afterById = new Map(after.map(r => [String(r.id), r]))
+  const afterById = new Map<string, Snapshot>(after.map((r: Snapshot) => [String(r.id), r] as [string, Snapshot]))
   for (const b of before) {
     await writeAudit(op, {
       entityType,

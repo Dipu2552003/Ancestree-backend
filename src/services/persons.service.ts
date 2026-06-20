@@ -270,7 +270,7 @@ async function wouldDisconnectFamily(personId: string, familyId: string): Promis
     [familyId],
   )
 
-  const all = new Set(people.map(p => p.id))
+  const all = new Set<string>(people.map(p => p.id))
   if (!all.has(personId)) return false
 
   const remaining = new Set(all)

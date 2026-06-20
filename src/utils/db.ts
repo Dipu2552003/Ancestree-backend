@@ -16,7 +16,7 @@ const pool = new Pool({
   connectionTimeoutMillis: 5_000,
 })
 
-pool.on('error', (err) => {
+pool.on('error', (err: Error) => {
   logger.error({ err }, 'unexpected PostgreSQL pool error')
   process.exit(1)
 })
