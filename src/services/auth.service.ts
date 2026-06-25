@@ -10,7 +10,7 @@ import {
 } from '../schemas/auth.schema'
 import { createNotification } from './notification.service'
 import { logger } from '../utils/logger'
-import { badRequest, unauthorized, notFound, conflict, serverError } from '../utils/errors'
+import { badRequest, unauthorized, forbidden, notFound, conflict, serverError } from '../utils/errors'
 
 function buildNamePrefix(displayName: string): string {
   const lastName = displayName.trim().split(' ').pop() ?? displayName
@@ -143,6 +143,25 @@ export async function login(input: LoginInput) {
     throw unauthorized('Invalid email or password')
   }
 
+  // Community accounts must authenticate through their own community page so the
+  // session is community-scoped. Block them from the platform-wide /login here —
+  // this is the hard enforcement; the frontend also redirects pre-emptively.
+  const { rows: [community] } = await query<{ slug: string }>(
+    `SELECT co.slug
+     FROM   community_members cm
+     JOIN   communities co ON co.id = cm.community_id
+     WHERE  cm.user_id = $1
+     LIMIT  1`,
+    [user.id],
+  )
+  if (community) {
+    logger.warn({ userId: user.id, slug: community.slug }, 'login: community account blocked from platform login')
+    throw forbidden(
+      'You are a community member. Please sign in from your community page.',
+      'community_login_required',
+    )
+  }
+
   // Prefer the family where person_id lives (same logic as refreshToken).
   // Also exclude soft-deleted families so a merged-away family is never returned.
   const { rows: [member] } = await query<{ family_id: string }>(
@@ -174,7 +193,8 @@ export async function signupViaInvite(input: SignupInput & { invite_token: strin
     id: string; primary_family_id: string; node_state: string; community_id: string | null
   }>(
     `SELECT id, primary_family_id, node_state, community_id FROM persons
-     WHERE invite_token = $1 AND deleted_at IS NULL`,
+     WHERE invite_token = $1 AND deleted_at IS NULL
+       AND invite_sent_at > NOW() - INTERVAL '5 minutes'`,
     [input.invite_token.toUpperCase()]
   )
   if (!person) throw notFound('Invalid or expired invite code')
@@ -275,9 +295,25 @@ export async function refreshToken(userId: string): Promise<{ token: string }> {
   return { token }
 }
 
-export async function checkEmail(input: CheckEmailInput): Promise<{ exists: boolean }> {
-  const { rowCount } = await query('SELECT 1 FROM users WHERE email = $1', [input.email])
-  return { exists: (rowCount ?? 0) > 0 }
+export async function checkEmail(
+  input: CheckEmailInput,
+): Promise<{ exists: boolean; community_slug?: string }> {
+  const { rows: [user] } = await query<{ id: string }>(
+    'SELECT id FROM users WHERE email = $1', [input.email],
+  )
+  if (!user) return { exists: false }
+
+  // Surface community membership so the login page can route community accounts
+  // to their /community/:slug sign-in instead of advancing the platform login.
+  const { rows: [community] } = await query<{ slug: string }>(
+    `SELECT co.slug
+     FROM   community_members cm
+     JOIN   communities co ON co.id = cm.community_id
+     WHERE  cm.user_id = $1
+     LIMIT  1`,
+    [user.id],
+  )
+  return { exists: true, ...(community ? { community_slug: community.slug } : {}) }
 }
 
 export async function getMe(userId: string) {

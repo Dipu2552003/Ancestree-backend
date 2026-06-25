@@ -25,7 +25,9 @@ export async function claimByToken(token: string, userId: string) {
     community_id: string | null
   }>(
     `SELECT id, full_name, node_state, claimed_by, primary_family_id, is_alive, community_id
-     FROM persons WHERE invite_token = $1 AND deleted_at IS NULL`,
+     FROM persons
+     WHERE invite_token = $1 AND deleted_at IS NULL
+       AND invite_sent_at > NOW() - INTERVAL '5 minutes'`,
     [token.toUpperCase()]
   )
 
@@ -109,7 +111,8 @@ export async function lookupToken(token: string) {
        ORDER BY (fp.gender = 'male') DESC NULLS LAST, fp.person_code
        LIMIT 1
      ) inv_father ON true
-     WHERE p.invite_token = $1 AND p.deleted_at IS NULL`,
+     WHERE p.invite_token = $1 AND p.deleted_at IS NULL
+       AND p.invite_sent_at > NOW() - INTERVAL '5 minutes'`,
     [token.toUpperCase()]
   )
 
