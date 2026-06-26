@@ -178,6 +178,48 @@ async function revertUpdate(op: OperationContext, row: AuditRow): Promise<void> 
   })
 }
 
+// Only headline operations appear in the user-facing timeline: adding a
+// person and accepting a merge. Everything else (field edits, relationship
+// tweaks, invites, …) is still fully audited for the safety net — it just
+// stays out of the panel. Undo operations are filtered out too: the original
+// entry shows an "Undone" badge instead, and hiding them means an undo can
+// never be re-undone from the UI (one-shot revert).
+const VISIBLE_ACTIONS = ['person.create', 'merge.accept']
+
+/** A family admin (the family's owner/manager) may undo any member's action. */
+async function isFamilyAdmin(familyId: string, userId: string): Promise<boolean> {
+  const { rows } = await query<{ role: string }>(
+    `SELECT role FROM family_members WHERE family_id = $1 AND user_id = $2`,
+    [familyId, userId],
+  )
+  return rows[0]?.role === 'admin'
+}
+
+/**
+ * The single operation that may be undone next in this family: the most recent
+ * un-reverted, user-visible operation. Undo is strictly newest-first — only
+ * this operation is undoable, never one from the middle of the history.
+ */
+async function topUndoableOperationId(familyId: string): Promise<string | null> {
+  const { rows } = await query<{ operation_id: string }>(
+    `SELECT operation_id FROM (
+       SELECT operation_id,
+              (ARRAY_AGG(action      ORDER BY seq))[1] AS action,
+              (ARRAY_AGG(reverted_by ORDER BY seq))[1] AS reverted_by,
+              MIN(seq)                                 AS min_seq
+       FROM   audit_log
+       WHERE  family_id = $1
+       GROUP  BY operation_id
+     ) g
+     WHERE  g.action = ANY($2::text[])
+       AND  g.reverted_by IS NULL
+     ORDER  BY g.min_seq DESC
+     LIMIT  1`,
+    [familyId, VISIBLE_ACTIONS],
+  )
+  return rows[0]?.operation_id ?? null
+}
+
 // ── Undo ──────────────────────────────────────────────────────────────────────
 
 export async function undoOperation(operationId: string, userId: string, familyId: string) {
@@ -201,6 +243,21 @@ export async function undoOperation(operationId: string, userId: string, familyI
   // that the operation is settled for both sides.
   if (targetAction === 'undo' || targetAction.startsWith('undo:')) {
     throw conflict('An undo cannot be reverted')
+  }
+
+  // Permission: only the member who performed the action — or a family admin —
+  // may undo it. (The UI also hides the control from everyone else.)
+  const actorId = rows[rows.length - 1].actor_id // operation initiator (lowest seq)
+  const admin   = await isFamilyAdmin(familyId, userId)
+  if (actorId !== userId && !admin) {
+    throw forbidden('Only the person who made this change, or a family admin, can undo it')
+  }
+
+  // Order: undo is newest-first only. The target must be the most recent
+  // un-reverted operation in this family — no undoing from the middle.
+  const topId = await topUndoableOperationId(familyId)
+  if (topId !== operationId) {
+    throw conflict('Undo the most recent change first — actions can only be undone in order')
   }
 
   const result = await withOperation({ action: 'undo', actorId: userId, familyId }, async op => {
@@ -304,18 +361,19 @@ export interface HistoryOperation {
   entry_count: number
   reverted: boolean
   reverted_by: string | null
+  /** This viewer performed the action. */
+  is_actor: boolean
+  /** This viewer may undo it right now (it is the newest un-reverted op and
+   *  they are its actor or a family admin). Drives the active Undo button. */
   can_undo: boolean
+  /** Undo is blocked for now — shown as a disabled "locked" state. */
+  undo_locked: boolean
+  /** Why it's locked: 'order' (a newer change must be undone first) or
+   *  'owner' (it's next in line, but only its actor/an admin may undo it). */
+  lock_reason: 'order' | 'owner' | null
 }
 
-// Only headline operations appear in the user-facing timeline: adding a
-// person and accepting a merge. Everything else (field edits, relationship
-// tweaks, invites, …) is still fully audited for the safety net — it just
-// stays out of the panel. Undo operations are filtered out too: the original
-// entry shows an "Undone" badge instead, and hiding them means an undo can
-// never be re-undone from the UI (one-shot revert).
-const VISIBLE_ACTIONS = ['person.create', 'merge.accept']
-
-export async function getFamilyHistory(familyId: string, limit = 50): Promise<HistoryOperation[]> {
+export async function getFamilyHistory(familyId: string, userId: string, limit = 50): Promise<HistoryOperation[]> {
   const { rows: ops } = await query<{
     operation_id: string
     action: string
@@ -369,12 +427,29 @@ export async function getFamilyHistory(familyId: string, limit = 50): Promise<Hi
     for (const u of users) actorNames.set(u.id, u.display_name)
   }
 
+  const isAdmin = await isFamilyAdmin(familyId, userId)
+  // `ops` is ordered newest-first, so the first un-reverted entry is the only
+  // operation that may be undone next (global newest-first stack).
+  const topId = ops.find(o => o.reverted_by === null)?.operation_id ?? null
+
   // For undo operations, prefer the marker row's action ('undo:<target>') for
   // a more specific summary.
   return ops.map(o => {
     const opEntries = entriesByOp.get(o.operation_id) ?? []
     const marker = opEntries.find(e => e.entity_type === 'operation')
     const action = marker?.action ?? o.action
+
+    const reverted = o.reverted_by !== null
+    const isActor  = o.actor_id !== null && o.actor_id === userId
+    const isTop    = o.operation_id === topId
+    // Undoable now only if it's the newest un-reverted op AND the viewer owns
+    // it (or is an admin). Otherwise it's locked: 'order' when a newer change
+    // must go first, 'owner' when it's next but belongs to someone else.
+    const canUndo    = !reverted && isTop && (isActor || isAdmin)
+    const undoLocked = !reverted && !canUndo
+    const lockReason: 'order' | 'owner' | null =
+      !undoLocked ? null : (isTop ? 'owner' : 'order')
+
     return {
       operation_id: o.operation_id,
       action: o.action,
@@ -383,9 +458,12 @@ export async function getFamilyHistory(familyId: string, limit = 50): Promise<Hi
       actor_name: o.actor_id ? (actorNames.get(o.actor_id) ?? null) : null,
       created_at: o.created_at,
       entry_count: o.entry_count,
-      reverted: o.reverted_by !== null,
+      reverted,
       reverted_by: o.reverted_by,
-      can_undo: o.reverted_by === null,
+      is_actor: isActor,
+      can_undo: canUndo,
+      undo_locked: undoLocked,
+      lock_reason: lockReason,
     }
   })
 }

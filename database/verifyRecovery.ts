@@ -89,7 +89,7 @@ async function main() {
       `SELECT reverted_by FROM audit_log WHERE operation_id = $1`, [opId])
     assert(stamped.every(r => r.reverted_by === undo1.undo_operation_id), 'original op stamped reverted_by = undo op')
 
-    const history = await getFamilyHistory(familyId)
+    const history = await getFamilyHistory(familyId, userId)
     const histEntry = history.find(h => h.operation_id === opId)
     assert(histEntry?.reverted === true && histEntry.can_undo === false, 'history shows the operation as reverted')
     assert(history.some(h => h.action === 'undo'), 'history lists the undo operation')

@@ -144,13 +144,16 @@ export async function createMergeRequest(
     throw notFound('One or more persons not found')
   }
 
-  const { rows: [initiatorFamily] } = await query<{ name: string }>(
-    `SELECT name FROM families WHERE id = $1`,
-    [initiatorFamilyId],
+  // Name the person who initiated the request (not their family) so the
+  // recipient sees who is asking.
+  const { rows: [initiator] } = await query<{ display_name: string }>(
+    `SELECT display_name FROM users WHERE id = $1`,
+    [initiatedBy],
   )
+  const initiatorName = initiator?.display_name ?? 'Someone'
 
   const message =
-    `"${initiatorFamily.name}" believes their "${newPerson.full_name}" ` +
+    `${initiatorName} believes their "${newPerson.full_name}" ` +
     `is the same person as your "${canonPerson.full_name}". Accept or Reject?`
 
   // If the canonical node is claimed, only the claimant is the decision-maker.

@@ -27,7 +27,7 @@ router.get('/:id/history', asyncHandler(async (req: Request, res: Response) => {
   const rawLimit = Number(req.query.limit)
   const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 200) : 50
 
-  const operations = await getFamilyHistory(familyId, limit)
+  const operations = await getFamilyHistory(familyId, req.user.userId, limit)
   res.json({ operations })
 }))
 

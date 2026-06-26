@@ -3,6 +3,7 @@ import { query, defaultRunner, type QueryRunner } from '../utils/db'
 import { withOperation, captureAndUpdate, auditCreate } from '../utils/audit'
 import { CreatePersonInput, UpdatePersonInput } from '../schemas/person.schema'
 import { searchDuplicates } from './merge'
+import { findSameTreeDuplicates } from './duplicates/sameTreeMatch'
 import { createPossibleMatchNotification } from './notification.service'
 import { logger } from '../utils/logger'
 import { badRequest, forbidden, notFound } from '../utils/errors'
@@ -106,7 +107,19 @@ export async function createPerson(
     }).catch(err => logger.error({ err }, 'possible_match notification failed'))
   ))
 
-  return { ...person, potential_matches }
+  // Same-family duplicate check (separate heuristic from the cross-family
+  // search above): does a node with this name already exist in this tree?
+  const same_tree_matches = await findSameTreeDuplicates({
+    fullName:  input.full_name,
+    gotra:     input.gotra ?? null,
+    birthYear: input.birth_year ?? null,
+    gender:    input.gender ?? null,
+  }, familyId, person.id).catch(err => {
+    logger.error({ err }, 'same-tree duplicate search failed')
+    return []
+  })
+
+  return { ...person, potential_matches, same_tree_matches }
 }
 
 export async function getPersonById(id: string, familyId: string) {
