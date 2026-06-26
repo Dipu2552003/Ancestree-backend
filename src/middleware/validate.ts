@@ -22,11 +22,9 @@ declare global {
   }
 }
 
-type Source = 'body' | 'query' | 'params'
-
-export function validate(schema: ZodSchema, source: Source = 'body'): RequestHandler {
+export function validate(schema: ZodSchema): RequestHandler {
   return (req: Request, _res: Response, next: NextFunction) => {
-    const result = schema.safeParse(req[source])
+    const result = schema.safeParse(req.body)
     if (!result.success) return next(result.error)
     req.validated = result.data
     next()
