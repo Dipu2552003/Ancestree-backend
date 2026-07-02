@@ -12,13 +12,35 @@ import { logger } from '../../utils/logger'
 import { forbidden, notFound } from '../../utils/errors'
 import { inferCascadeRelationships } from './cascade'
 
+// Profile columns copied onto the canonical node when the acceptor chooses to
+// keep the merged node's details. Identity/graph columns (id, person_code,
+// family, node_state, claimed_by, visibility, …) are deliberately excluded.
+const PROFILE_COLS = [
+  'full_name', 'first_name', 'middle_name', 'last_name', 'name_native', 'nickname',
+  'gender', 'gotra', 'religion',
+  'birth_date', 'birth_year', 'birth_place',
+  'death_date', 'death_year', 'death_place',
+  'phone', 'whatsapp', 'email',
+  'current_address', 'current_city', 'current_state', 'current_country', 'current_pincode',
+  'native_village', 'native_tehsil', 'native_district', 'native_state', 'native_country',
+  'bio', 'occupation', 'occupation_detail', 'education',
+  'photo_url', 'photo_thumbnail_url',
+  'bio_mother_name', 'bio_father_name',
+] as const
+
+export type KeepData = 'canonical' | 'merged'
+
 /**
  * Accept a merge request. Runs as a single database transaction.
  * The canonical node survives; the merged (newly-created) node is soft-deleted.
+ * keepData = 'merged' copies the merged node's profile details onto the
+ * canonical node first (per column — the merged side wins only where it has
+ * a value, so blanks never erase existing data).
  */
 export async function acceptMerge(
   mergeRecordId: string,
   acceptedBy:    string,
+  keepData:      KeepData = 'canonical',
 ): Promise<{ canonical_person_id: string; conflicts: MergeConflict[] }> {
   logger.info({ mergeRecordId, acceptedBy }, 'merge accept: start')
 
@@ -74,6 +96,35 @@ export async function acceptMerge(
         [canonFamilyId, acceptedBy],
       )
       if (!membership) throw forbidden('You are not a member of the target family')
+    }
+
+    // Step 2b: acceptor chose the merged node's details — copy its profile
+    // onto the canonical row before anything is deleted. Audited, so undo
+    // restores the canonical profile along with everything else.
+    if (keepData === 'merged') {
+      const { rows: [m] } = await tx.query<Snapshot>(
+        `SELECT ${PROFILE_COLS.join(', ')}, is_alive FROM persons WHERE id = $1`,
+        [deletedId],
+      )
+      const sets: string[] = []
+      const params: unknown[] = []
+      for (const col of PROFILE_COLS) {
+        const v = m?.[col]
+        if (v !== null && v !== undefined) {
+          params.push(v)
+          sets.push(`${col} = $${params.length}`)
+        }
+      }
+      // is_alive defaults to TRUE, so only a recorded death counts as "has a
+      // value" — never resurrect a canonical node marked deceased.
+      if (m?.is_alive === false) sets.push('is_alive = FALSE')
+      if (sets.length > 0) {
+        sets.push('updated_at = NOW()')
+        await captureAndUpdate(op, 'person',
+          { sql: 'id = $1', params: [canonicalId] },
+          { sql: sets.join(', '), params },
+        )
+      }
     }
 
     // Capture every user who was a member of either family BEFORE mutations.

@@ -45,9 +45,12 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
   res.status(201).json(result)
 }))
 
-/** POST /api/merges/:id/accept — execute the merge */
+/** POST /api/merges/:id/accept — execute the merge.
+ *  body.keep_data: 'merged' keeps the sender's profile details on the
+ *  surviving node; anything else keeps the canonical details (default). */
 router.post('/:id/accept', asyncHandler(async (req: Request, res: Response) => {
-  const result = await acceptMerge(req.params.id as string, req.user.userId)
+  const keepData = req.body?.keep_data === 'merged' ? 'merged' : 'canonical'
+  const result = await acceptMerge(req.params.id as string, req.user.userId, keepData)
   res.json(result)
 }))
 
