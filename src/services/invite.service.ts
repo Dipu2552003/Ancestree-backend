@@ -1,5 +1,5 @@
 import { query } from '../utils/db'
-import { withOperation } from '../utils/audit'
+import { withOperation, captureAndUpdate } from '../utils/audit'
 import { logger } from '../utils/logger'
 import { notFound, conflict, unauthorized } from '../utils/errors'
 import * as personsRepo from '../repositories/persons.repo'
@@ -17,6 +17,27 @@ export async function claimByToken(token: string, userId: string) {
   if (!actor) {
     logger.warn({ userId }, 'claimByToken: token references a missing user')
     throw unauthorized('Your session is no longer valid — please sign in again')
+  }
+
+  // One account = one person. An account that already represents someone must
+  // not claim a second identity — that silently marks the invited node
+  // "claimed" by an account that isn't its person (and no new account exists
+  // for them). The invitee must log out and sign up fresh.
+  const { rows: [existingIdentity] } = await query<{ id: string }>(
+    `SELECT p.id FROM persons p
+     WHERE  p.claimed_by = $1 AND p.deleted_at IS NULL
+     UNION
+     SELECT u.person_id AS id FROM users u
+     WHERE  u.id = $1 AND u.person_id IS NOT NULL
+     LIMIT  1`,
+    [userId],
+  )
+  if (existingIdentity) {
+    logger.warn({ userId }, 'claimByToken: account already has a person node')
+    throw conflict(
+      'Your account already represents a person in a tree. ' +
+      'Log out and create a new account to claim this invite.',
+    )
   }
 
   const { rows: [person] } = await query<{
@@ -47,6 +68,14 @@ export async function claimByToken(token: string, userId: string) {
     { action: 'person.claim', actorId: userId, familyId: person.primary_family_id },
     async op => {
       await personsRepo.markClaimed(person.id, userId, op)
+      // Point the account at its newly-claimed node — JWT refresh and merge
+      // claim-transfer both key off users.person_id. The identity guard above
+      // guarantees person_id was NULL, so this can never steal a pointer.
+      await captureAndUpdate(op, 'user',
+        { sql: 'id = $1 AND person_id IS NULL', params: [userId] },
+        { sql: 'person_id = $1', params: [person.id] },
+        { snapshotCols: 'id, person_id' },
+      )
       if (!alreadyMember) {
         await familyMembersRepo.insert(person.primary_family_id, userId, 'member', op)
       }
