@@ -186,6 +186,19 @@ async function revertUpdate(op: OperationContext, row: AuditRow): Promise<void> 
 // never be re-undone from the UI (one-shot revert).
 const VISIBLE_ACTIONS = ['person.create', 'merge.accept']
 
+// Undo runs as two independent newest-first stacks — merges in one, structural
+// add/deletes in the other — so a merge can be undone without first unwinding
+// people added after it (they touch different entities). Order is still strict
+// *within* each track.
+type UndoTrack = 'merge' | 'structure'
+function trackOf(action: string): UndoTrack {
+  return action.startsWith('merge') ? 'merge' : 'structure'
+}
+const TRACK_ACTIONS: Record<UndoTrack, string[]> = {
+  merge:     VISIBLE_ACTIONS.filter(a => trackOf(a) === 'merge'),
+  structure: VISIBLE_ACTIONS.filter(a => trackOf(a) === 'structure'),
+}
+
 /** A family admin (the family's owner/manager) may undo any member's action. */
 async function isFamilyAdmin(familyId: string, userId: string): Promise<boolean> {
   const { rows } = await query<{ role: string }>(
@@ -196,11 +209,12 @@ async function isFamilyAdmin(familyId: string, userId: string): Promise<boolean>
 }
 
 /**
- * The single operation that may be undone next in this family: the most recent
- * un-reverted, user-visible operation. Undo is strictly newest-first — only
- * this operation is undoable, never one from the middle of the history.
+ * The single operation that may be undone next in this family *within one
+ * track*: its most recent un-reverted, user-visible operation. Undo is
+ * strictly newest-first per track — never from the middle of a track's
+ * history.
  */
-async function topUndoableOperationId(familyId: string): Promise<string | null> {
+async function topUndoableOperationId(familyId: string, track: UndoTrack): Promise<string | null> {
   const { rows } = await query<{ operation_id: string }>(
     `SELECT operation_id FROM (
        SELECT operation_id,
@@ -215,7 +229,7 @@ async function topUndoableOperationId(familyId: string): Promise<string | null> 
        AND  g.reverted_by IS NULL
      ORDER  BY g.min_seq DESC
      LIMIT  1`,
-    [familyId, VISIBLE_ACTIONS],
+    [familyId, TRACK_ACTIONS[track]],
   )
   return rows[0]?.operation_id ?? null
 }
@@ -253,11 +267,12 @@ export async function undoOperation(operationId: string, userId: string, familyI
     throw forbidden('Only the person who made this change, or a family admin, can undo it')
   }
 
-  // Order: undo is newest-first only. The target must be the most recent
-  // un-reverted operation in this family — no undoing from the middle.
-  const topId = await topUndoableOperationId(familyId)
+  // Order: newest-first within the target's own track (merge vs structure).
+  // Merges and add/deletes undo independently, but no undoing from the middle
+  // of either track.
+  const topId = await topUndoableOperationId(familyId, trackOf(targetAction))
   if (topId !== operationId) {
-    throw conflict('Undo the most recent change first — actions can only be undone in order')
+    throw conflict('Undo the most recent change of this type first — each list is undone in order')
   }
 
   const result = await withOperation({ action: 'undo', actorId: userId, familyId }, async op => {
@@ -428,9 +443,12 @@ export async function getFamilyHistory(familyId: string, userId: string, limit =
   }
 
   const isAdmin = await isFamilyAdmin(familyId, userId)
-  // `ops` is ordered newest-first, so the first un-reverted entry is the only
-  // operation that may be undone next (global newest-first stack).
-  const topId = ops.find(o => o.reverted_by === null)?.operation_id ?? null
+  // `ops` is ordered newest-first; each track's first un-reverted entry is the
+  // only operation undoable next in that track (independent per-track stacks).
+  const topIdByTrack: Record<UndoTrack, string | null> = {
+    merge:     ops.find(o => o.reverted_by === null && trackOf(o.action) === 'merge')?.operation_id ?? null,
+    structure: ops.find(o => o.reverted_by === null && trackOf(o.action) === 'structure')?.operation_id ?? null,
+  }
 
   // For undo operations, prefer the marker row's action ('undo:<target>') for
   // a more specific summary.
@@ -441,10 +459,10 @@ export async function getFamilyHistory(familyId: string, userId: string, limit =
 
     const reverted = o.reverted_by !== null
     const isActor  = o.actor_id !== null && o.actor_id === userId
-    const isTop    = o.operation_id === topId
-    // Undoable now only if it's the newest un-reverted op AND the viewer owns
-    // it (or is an admin). Otherwise it's locked: 'order' when a newer change
-    // must go first, 'owner' when it's next but belongs to someone else.
+    const isTop    = o.operation_id === topIdByTrack[trackOf(o.action)]
+    // Undoable now only if it's the newest un-reverted op in its track AND the
+    // viewer owns it (or is an admin). Otherwise it's locked: 'order' when a
+    // newer change must go first, 'owner' when it's next but someone else's.
     const canUndo    = !reverted && isTop && (isActor || isAdmin)
     const undoLocked = !reverted && !canUndo
     const lockReason: 'order' | 'owner' | null =

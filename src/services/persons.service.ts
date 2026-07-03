@@ -152,7 +152,7 @@ export async function updatePerson(
     'is_alive', 'bio', 'occupation', 'occupation_detail',
     'photo_url', 'photo_thumbnail_url', 'visibility',
     'phone', 'whatsapp', 'email',
-    'current_address', 'current_city', 'current_state', 'current_country', 'current_pincode',
+    'current_address', 'current_city', 'current_district', 'current_state', 'current_country', 'current_pincode',
     'native_village', 'native_tehsil', 'native_district', 'native_state', 'native_country',
     'gotra', 'education',
     'bio_mother_name', 'bio_father_name',

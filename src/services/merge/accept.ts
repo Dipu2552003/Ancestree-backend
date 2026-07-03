@@ -259,13 +259,17 @@ export async function acceptMerge(
         { sql: `claimed_by = $1, node_state = 'claimed', updated_at = NOW()`, params: [claimant] },
       )
       if (claimAfter.length === 0) orphanedUserId = claimant
-      // Join the canonical family
+      // Join the canonical family, keeping the role they held in their own
+      // family — an admin who merges in stays an admin, so the combined
+      // family ends up with both families' admins.
       const { rows: [claimantJoin] } = await tx.query<Snapshot>(
         `INSERT INTO family_members (family_id, user_id, role)
-         VALUES ($1, $2, 'member')
+         SELECT $1, $2, COALESCE(
+           (SELECT role FROM family_members WHERE family_id = $3 AND user_id = $2),
+           'member')
          ON CONFLICT DO NOTHING
          RETURNING *`,
-        [canonFamilyId, claimant],
+        [canonFamilyId, claimant, mergedFamilyId],
       )
       if (claimantJoin) await auditCreate(op, 'family_member', claimantJoin)
       // Leave the now-empty merged family so the next JWT issued picks the right one.
@@ -309,11 +313,11 @@ export async function acceptMerge(
       )
 
       // Step 5e: Add every member of the merged family to the canonical family
-      // (skip users already there). This covers invited/joined members of the
-      // merged family who should now be part of the canonical family.
+      // (skip users already there), keeping their roles — the merged family's
+      // admin becomes a second admin of the combined family.
       const { rows: copiedMembers } = await tx.query<Snapshot>(
         `INSERT INTO family_members (family_id, user_id, role)
-         SELECT $1, user_id, 'member'
+         SELECT $1, user_id, role
          FROM   family_members
          WHERE  family_id = $2
          ON CONFLICT DO NOTHING

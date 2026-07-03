@@ -52,8 +52,8 @@ interface DBPerson {
   birth_date: string | null; birth_year: number | null; birth_place: string | null
   death_date: string | null; death_year: number | null; death_place: string | null; is_alive: boolean
   phone: string | null; whatsapp: string | null; email: string | null
-  current_address: string | null; current_city: string | null; current_state: string | null
-  current_country: string | null; current_pincode: string | null
+  current_address: string | null; current_city: string | null; current_district: string | null
+  current_state: string | null; current_country: string | null; current_pincode: string | null
   native_village: string | null; native_tehsil: string | null; native_district: string | null
   native_state: string | null; native_country: string | null
   occupation: string | null; occupation_detail: string | null; education: string | null; bio: string | null
@@ -231,7 +231,7 @@ export async function fetchFamilyGraph(
               p.birth_date, p.birth_year, p.birth_place,
               p.is_alive, p.death_date, p.death_year, p.death_place,
               p.phone, p.whatsapp, p.email,
-              p.current_address, p.current_city, p.current_state, p.current_country, p.current_pincode,
+              p.current_address, p.current_city, p.current_district, p.current_state, p.current_country, p.current_pincode,
               p.native_village, p.native_tehsil, p.native_district, p.native_state, p.native_country,
               p.occupation, p.occupation_detail, p.education, p.bio,
               p.photo_url, p.photo_thumbnail_url
@@ -341,6 +341,7 @@ export async function fetchFamilyGraph(
       email:              p.email,
       currentAddress:     p.current_address,
       currentCity:        p.current_city,
+      currentDistrict:    p.current_district,
       currentState:       p.current_state,
       currentCountry:     p.current_country,
       currentPincode:     p.current_pincode,

@@ -37,6 +37,7 @@ export const updatePersonSchema = createPersonSchema.partial().extend({
   whatsapp:          z.string().max(50).nullish(),
   email:             z.string().max(200).nullish(),
   current_address:   z.string().max(500).nullish(),
+  current_district:  z.string().max(100).nullish(),
   current_pincode:   z.string().max(20).nullish(),
   native_tehsil:     z.string().max(100).nullish(),
   native_district:   z.string().max(100).nullish(),
