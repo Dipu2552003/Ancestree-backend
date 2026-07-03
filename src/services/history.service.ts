@@ -178,13 +178,17 @@ async function revertUpdate(op: OperationContext, row: AuditRow): Promise<void> 
   })
 }
 
-// Only headline operations appear in the user-facing timeline: adding a
-// person and accepting a merge. Everything else (field edits, relationship
-// tweaks, invites, …) is still fully audited for the safety net — it just
-// stays out of the panel. Undo operations are filtered out too: the original
-// entry shows an "Undone" badge instead, and hiding them means an undo can
-// never be re-undone from the UI (one-shot revert).
-const VISIBLE_ACTIONS = ['person.create', 'merge.accept']
+// Undoable headline operations: adding a person and accepting a merge. These
+// get an Undo control and form the two undo stacks. Undo operations themselves
+// are excluded — the original entry shows an "Undone" badge instead, so an undo
+// can never be re-undone from the UI (one-shot revert).
+const UNDOABLE_ACTIONS = ['person.create', 'merge.accept']
+
+// Everything the history panel *lists*. person.update (proxy detail edits) is
+// surfaced in the "Detail edits" tab so we track who edited whom, but it is NOT
+// undoable — it only records the edit. Everything else (relationship tweaks,
+// invites, …) stays fully audited but out of the panel.
+const LISTED_ACTIONS = [...UNDOABLE_ACTIONS, 'person.update']
 
 // Undo runs as two independent newest-first stacks — merges in one, structural
 // add/deletes in the other — so a merge can be undone without first unwinding
@@ -195,8 +199,8 @@ function trackOf(action: string): UndoTrack {
   return action.startsWith('merge') ? 'merge' : 'structure'
 }
 const TRACK_ACTIONS: Record<UndoTrack, string[]> = {
-  merge:     VISIBLE_ACTIONS.filter(a => trackOf(a) === 'merge'),
-  structure: VISIBLE_ACTIONS.filter(a => trackOf(a) === 'structure'),
+  merge:     UNDOABLE_ACTIONS.filter(a => trackOf(a) === 'merge'),
+  structure: UNDOABLE_ACTIONS.filter(a => trackOf(a) === 'structure'),
 }
 
 /** A family admin (the family's owner/manager) may undo any member's action. */
@@ -257,6 +261,12 @@ export async function undoOperation(operationId: string, userId: string, familyI
   // that the operation is settled for both sides.
   if (targetAction === 'undo' || targetAction.startsWith('undo:')) {
     throw conflict('An undo cannot be reverted')
+  }
+
+  // Detail edits (person.update) are tracked but not undoable — reject early
+  // rather than let the ordering check throw a misleading message.
+  if (!UNDOABLE_ACTIONS.includes(targetAction)) {
+    throw forbidden('This kind of change cannot be undone')
   }
 
   // Permission: only the member who performed the action — or a family admin —
@@ -396,8 +406,15 @@ export async function getFamilyHistory(familyId: string, userId: string, limit =
     reverted_by: string | null
     created_at: string
     entry_count: number
+    target_name: string | null
   }>(
-    `SELECT operation_id, action, actor_id, reverted_by, created_at, entry_count
+    // The person entity's current name (target_name) labels "who edited whom" in
+    // the detail-edits tab. Self-edits — a claimed node's owner editing their own
+    // profile — are excluded there: only proxy/other-node edits are of interest,
+    // and since claimed nodes can only be edited by their owner, dropping
+    // claimed_by = actor leaves exactly the proxy edits.
+    `SELECT g.operation_id, g.action, g.actor_id, g.reverted_by, g.created_at,
+            g.entry_count, p.full_name AS target_name
      FROM (
        SELECT operation_id,
               (ARRAY_AGG(action      ORDER BY seq))[1] AS action,
@@ -405,15 +422,18 @@ export async function getFamilyHistory(familyId: string, userId: string, limit =
               (ARRAY_AGG(reverted_by ORDER BY seq))[1] AS reverted_by,
               MIN(created_at)                          AS created_at,
               COUNT(*)::int                            AS entry_count,
-              MIN(seq)                                 AS min_seq
+              MIN(seq)                                 AS min_seq,
+              (ARRAY_AGG(entity_id ORDER BY seq) FILTER (WHERE entity_type = 'person'))[1] AS person_id
        FROM   audit_log
        WHERE  family_id = $1
        GROUP  BY operation_id
      ) g
+     LEFT JOIN persons p ON p.id = g.person_id
      WHERE  g.action = ANY($2::text[])
+       AND  NOT (g.action = 'person.update' AND p.claimed_by IS NOT NULL AND p.claimed_by = g.actor_id)
      ORDER  BY g.min_seq DESC
      LIMIT  $3`,
-    [familyId, VISIBLE_ACTIONS, limit],
+    [familyId, LISTED_ACTIONS, limit],
   )
   if (ops.length === 0) return []
 
@@ -446,8 +466,8 @@ export async function getFamilyHistory(familyId: string, userId: string, limit =
   // `ops` is ordered newest-first; each track's first un-reverted entry is the
   // only operation undoable next in that track (independent per-track stacks).
   const topIdByTrack: Record<UndoTrack, string | null> = {
-    merge:     ops.find(o => o.reverted_by === null && trackOf(o.action) === 'merge')?.operation_id ?? null,
-    structure: ops.find(o => o.reverted_by === null && trackOf(o.action) === 'structure')?.operation_id ?? null,
+    merge:     ops.find(o => o.reverted_by === null && UNDOABLE_ACTIONS.includes(o.action) && trackOf(o.action) === 'merge')?.operation_id ?? null,
+    structure: ops.find(o => o.reverted_by === null && UNDOABLE_ACTIONS.includes(o.action) && trackOf(o.action) === 'structure')?.operation_id ?? null,
   }
 
   // For undo operations, prefer the marker row's action ('undo:<target>') for
@@ -459,19 +479,25 @@ export async function getFamilyHistory(familyId: string, userId: string, limit =
 
     const reverted = o.reverted_by !== null
     const isActor  = o.actor_id !== null && o.actor_id === userId
-    const isTop    = o.operation_id === topIdByTrack[trackOf(o.action)]
+    const undoable = UNDOABLE_ACTIONS.includes(o.action)
+    const isTop    = undoable && o.operation_id === topIdByTrack[trackOf(o.action)]
     // Undoable now only if it's the newest un-reverted op in its track AND the
-    // viewer owns it (or is an admin). Otherwise it's locked: 'order' when a
-    // newer change must go first, 'owner' when it's next but someone else's.
-    const canUndo    = !reverted && isTop && (isActor || isAdmin)
-    const undoLocked = !reverted && !canUndo
+    // viewer owns it (or is an admin). Detail edits (person.update) are never
+    // undoable — no button, no lock badge.
+    const canUndo    = undoable && !reverted && isTop && (isActor || isAdmin)
+    const undoLocked = undoable && !reverted && !canUndo
     const lockReason: 'order' | 'owner' | null =
       !undoLocked ? null : (isTop ? 'owner' : 'order')
+
+    // Detail edits get a "who edited whom" summary from the joined target name.
+    const summary = o.action === 'person.update'
+      ? (o.target_name ? `Edited ${o.target_name}’s details` : 'Edited a member’s details')
+      : summarize(action, opEntries)
 
     return {
       operation_id: o.operation_id,
       action: o.action,
-      summary: summarize(action, opEntries),
+      summary,
       actor_id: o.actor_id,
       actor_name: o.actor_id ? (actorNames.get(o.actor_id) ?? null) : null,
       created_at: o.created_at,

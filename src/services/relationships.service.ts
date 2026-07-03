@@ -279,6 +279,53 @@ export async function reparentChildren(
   return result
 }
 
+/**
+ * Manual sibling order — used when birth years are unknown. Assigns
+ * child_order = 1..n (1 = eldest) following `orderedChildIds`, writing every
+ * PARENT_OF edge of each child (father + mother) so the order reads the same
+ * from either parent. The id set must be exactly the parent's children.
+ */
+export async function reorderChildren(
+  parentId: string,
+  orderedChildIds: string[],
+  userId: string,
+  familyId: string,
+): Promise<{ updated: number }> {
+  if (new Set(orderedChildIds).size !== orderedChildIds.length) {
+    throw badRequest('Duplicate child ids in order list')
+  }
+
+  const { rows: children } = await query<{ to_person_id: string }>(
+    `SELECT to_person_id FROM relationships
+     WHERE  from_person_id = $1 AND rel_type = 'PARENT_OF'
+       AND  primary_family_id = $2 AND deleted_at IS NULL`,
+    [parentId, familyId],
+  )
+  const actual = new Set(children.map(c => c.to_person_id))
+  if (actual.size < 2) throw badRequest('This person has fewer than two children to arrange')
+  if (orderedChildIds.length !== actual.size || orderedChildIds.some(id => !actual.has(id))) {
+    throw badRequest('Order list must contain exactly this parent’s children')
+  }
+
+  const result = await withOperation({ action: 'children.reorder', actorId: userId, familyId }, async op => {
+    let updated = 0
+    for (let i = 0; i < orderedChildIds.length; i++) {
+      const { after } = await captureAndUpdate(op, 'relationship',
+        {
+          sql: `to_person_id = $1 AND rel_type = 'PARENT_OF' AND primary_family_id = $2 AND deleted_at IS NULL`,
+          params: [orderedChildIds[i], familyId],
+        },
+        { sql: `child_order = $1`, params: [i + 1] },
+      )
+      updated += after.length
+    }
+    return { updated }
+  })
+
+  logger.info({ parentId, children: orderedChildIds.length, edges: result.updated, familyId }, 'children reordered')
+  return result
+}
+
 export async function getRelationshipById(id: string, familyId: string) {
   const { rows: [rel] } = await query(
     `SELECT * FROM relationships

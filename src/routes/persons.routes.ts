@@ -10,7 +10,7 @@ import {
 import {
   createPerson, getPersonById, updatePerson, deletePerson, generateInviteToken,
 } from '../services/persons.service'
-import { reparentChildren } from '../services/relationships.service'
+import { reparentChildren, reorderChildren } from '../services/relationships.service'
 
 const reparentSchema = z.object({
   changes: z.array(z.object({
@@ -19,6 +19,11 @@ const reparentSchema = z.object({
   })).min(1),
 })
 type ReparentInput = z.infer<typeof reparentSchema>
+
+const reorderSchema = z.object({
+  ordered_child_ids: z.array(z.string().uuid()).min(2),
+})
+type ReorderInput = z.infer<typeof reorderSchema>
 
 const router = Router()
 router.use(requireAuth)
@@ -59,6 +64,22 @@ router.post('/:id/reparent', validate(reparentSchema), asyncHandler(async (req: 
   const result = await reparentChildren(
     req.params.id as string,
     input.changes,
+    req.user.userId,
+    req.user.familyId,
+  )
+  res.json(result)
+}))
+
+/**
+ * Manual sibling order (used when birth years are unknown).
+ *   :id                     = the parent whose children are being arranged
+ *   body.ordered_child_ids  = ALL of that parent's children, eldest first
+ */
+router.post('/:id/children/reorder', validate(reorderSchema), asyncHandler(async (req: Request, res: Response) => {
+  const input = req.validated as ReorderInput
+  const result = await reorderChildren(
+    req.params.id as string,
+    input.ordered_child_ids,
     req.user.userId,
     req.user.familyId,
   )

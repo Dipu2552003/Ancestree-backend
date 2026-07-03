@@ -64,6 +64,7 @@ interface DBPerson {
 interface DBRelationship {
   id: string; from_person_id: string; to_person_id: string
   rel_type: string; sub_type: string | null; is_active: boolean
+  child_order: number | null
 }
 
 
@@ -250,7 +251,7 @@ export async function fetchFamilyGraph(
       [familyId]
     ),
     query<DBRelationship>(
-      `SELECT id, from_person_id, to_person_id, rel_type, sub_type, is_active
+      `SELECT id, from_person_id, to_person_id, rel_type, sub_type, is_active, child_order
        FROM relationships
        WHERE primary_family_id = $1 AND deleted_at IS NULL`,
       [familyId]
@@ -364,9 +365,10 @@ export async function fetchFamilyGraph(
     target: r.to_person_id,
     type: 'familyEdge',
     data: {
-      relType:  r.rel_type,
-      subType:  r.sub_type,
-      isActive: r.is_active,
+      relType:    r.rel_type,
+      subType:    r.sub_type,
+      isActive:   r.is_active,
+      childOrder: r.child_order,
     },
   }))
 
