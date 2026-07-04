@@ -8,6 +8,8 @@
  * accept.ts    Operation 3   acceptMerge — atomic transaction: redirect rels, soft-delete dup, notify
  * cascade.ts   (internal)    inferCascadeRelationships — step 5f of acceptMerge
  * reject.ts    Operation 4   rejectMerge — mark rejected + notify initiator
+ * adminOps.ts  (owner)       listCommunityMerges + forceMerge — community-owner
+ *                            authority over all merges in their community
  *
  * Operation 5 (recomputeFamilyHead) lives in ../familyHead.service.ts and is
  * called internally by acceptMerge.
@@ -18,3 +20,4 @@ export { searchDuplicates } from './search'
 export { listSentMergeRequests, getMergeById, createMergeRequest } from './requests'
 export { acceptMerge } from './accept'
 export { rejectMerge } from './reject'
+export { listCommunityMerges, forceMerge, type CommunityMergeRow } from './adminOps'

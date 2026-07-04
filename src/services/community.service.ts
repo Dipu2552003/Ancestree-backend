@@ -41,6 +41,20 @@ async function assertAdmin(communityId: string, userId: string): Promise<void> {
   }
 }
 
+/** The requester's own membership in a community — lets the UI reveal
+ *  role-gated tools (e.g. the owner's merge console). */
+export async function getMyCommunityRole(slug: string, userId: string) {
+  const community = await getBySlug(slug)
+  const { rows: [member] } = await query<{ role: string }>(
+    `SELECT role FROM community_members WHERE community_id = $1 AND user_id = $2`,
+    [community.id, userId],
+  )
+  return {
+    role:     member?.role ?? null,
+    is_owner: community.owner_id === userId,
+  }
+}
+
 function buildNamePrefix(displayName: string): string {
   const lastName = displayName.trim().split(' ').pop() ?? displayName
   return lastName.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 6).padEnd(3, 'X')

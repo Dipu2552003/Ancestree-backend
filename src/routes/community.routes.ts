@@ -15,7 +15,9 @@ import {
   communityLogin, communitySignup, joinCommunity, leaveCommunity,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
   listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
+  getMyCommunityRole,
 } from '../services/community.service'
+import { listCommunityMerges, forceMerge } from '../services/merge'
 import { searchPersons } from '../services/search.service'
 import { query } from '../utils/db'
 
@@ -196,6 +198,34 @@ router.post('/:slug/join-code/reset', requireAuth, asyncHandler(async (req: Requ
 router.get('/:slug/families', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const result = await listCommunityFamilies(req.params['slug'] as string, req.user.userId)
   res.json(result)
+}))
+
+// ── Requester's own membership (role discovery for the UI) ────────────────────
+
+router.get('/:slug/me', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await getMyCommunityRole(req.params['slug'] as string, req.user.userId)
+  res.json(result)
+}))
+
+// ── Owner-only: community-wide merge management ───────────────────────────────
+
+router.get('/:slug/merges', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const status = typeof req.query.status === 'string' ? req.query.status : undefined
+  const merges = await listCommunityMerges(req.params['slug'] as string, req.user.userId, status)
+  res.json({ merges })
+}))
+
+router.post('/:slug/merges/force', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const { merged_person_id, canonical_person_id, keep_data } = req.body ?? {}
+  const keepData = keep_data === 'merged' ? 'merged' as const : 'canonical' as const
+  const result = await forceMerge(
+    req.params['slug'] as string,
+    req.user.userId,
+    merged_person_id,
+    canonical_person_id,
+    keepData,
+  )
+  res.status(201).json(result)
 }))
 
 export default router

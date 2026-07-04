@@ -23,19 +23,27 @@ export async function rejectMerge(
 
   // If the canonical node is claimed, only the claimant can reject.
   // Otherwise any member of the canonical family can reject.
+  // The community OWNER bypasses both gates (full merge authority).
   const { rows: [canonPerson] } = await query<{ primary_family_id: string }>(
     `SELECT primary_family_id FROM persons WHERE id = $1`,
     [record.canonical_person_id],
   )
+  const { rows: [ownerRow] } = await query(
+    `SELECT 1 AS ok FROM families f
+     JOIN   communities c ON c.id = f.community_id
+     WHERE  f.id = $1 AND c.owner_id = $2`,
+    [canonPerson.primary_family_id, rejectedBy],
+  )
+  const isCommunityOwner = !!ownerRow
   const { rows: [canonClaimant] } = await query<{ id: string }>(
     `SELECT id FROM users WHERE person_id = $1 LIMIT 1`,
     [record.canonical_person_id],
   )
   if (canonClaimant) {
-    if (canonClaimant.id !== rejectedBy) {
+    if (canonClaimant.id !== rejectedBy && !isCommunityOwner) {
       throw forbidden('Only the claimed owner of this node can reject this merge')
     }
-  } else {
+  } else if (!isCommunityOwner) {
     const { rows: [membership] } = await query(
       `SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2`,
       [canonPerson.primary_family_id, rejectedBy],

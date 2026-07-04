@@ -80,6 +80,16 @@ export async function acceptMerge(
     // All audit rows for this merge are scoped to the surviving family.
     op.familyId = canonFamilyId
 
+    // The community OWNER has full merge authority over every tree in their
+    // community — bypasses both the claimant and family-membership gates.
+    const { rows: [ownerRow] } = await tx.query(
+      `SELECT 1 AS ok FROM families f
+       JOIN   communities c ON c.id = f.community_id
+       WHERE  f.id = $1 AND c.owner_id = $2`,
+      [canonFamilyId, acceptedBy],
+    )
+    const isCommunityOwner = !!ownerRow
+
     // If the canonical node is claimed, only the claimant can accept.
     // Otherwise any member of the canonical family can accept.
     const { rows: [canonClaimant] } = await tx.query<{ id: string }>(
@@ -87,10 +97,10 @@ export async function acceptMerge(
       [canonicalId],
     )
     if (canonClaimant) {
-      if (canonClaimant.id !== acceptedBy) {
+      if (canonClaimant.id !== acceptedBy && !isCommunityOwner) {
         throw forbidden('Only the claimed owner of this node can accept this merge')
       }
-    } else {
+    } else if (!isCommunityOwner) {
       const { rows: [membership] } = await tx.query(
         `SELECT 1 FROM family_members WHERE family_id = $1 AND user_id = $2`,
         [canonFamilyId, acceptedBy],
