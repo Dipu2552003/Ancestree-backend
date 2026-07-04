@@ -41,6 +41,19 @@ async function assertAdmin(communityId: string, userId: string): Promise<void> {
   }
 }
 
+/** Total person nodes across every tree in the community (all families
+ *  combined), for the community-wide count on the family badge. */
+export async function getCommunityStats(slug: string) {
+  const community = await getBySlug(slug)
+  const { rows: [row] } = await query<{ total_persons: string }>(
+    `SELECT COUNT(*)::text AS total_persons
+     FROM   persons
+     WHERE  community_id = $1 AND deleted_at IS NULL`,
+    [community.id],
+  )
+  return { total_persons: parseInt(row?.total_persons ?? '0', 10) }
+}
+
 /** The requester's own membership in a community — lets the UI reveal
  *  role-gated tools (e.g. the owner's merge console). */
 export async function getMyCommunityRole(slug: string, userId: string) {

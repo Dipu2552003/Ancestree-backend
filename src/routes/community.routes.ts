@@ -15,7 +15,7 @@ import {
   communityLogin, communitySignup, joinCommunity, leaveCommunity,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
   listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
-  getMyCommunityRole,
+  getMyCommunityRole, getCommunityStats,
 } from '../services/community.service'
 import { listCommunityMerges, forceMerge } from '../services/merge'
 import { searchPersons } from '../services/search.service'
@@ -204,6 +204,13 @@ router.get('/:slug/families', requireAuth, asyncHandler(async (req: Request, res
 
 router.get('/:slug/me', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const result = await getMyCommunityRole(req.params['slug'] as string, req.user.userId)
+  res.json(result)
+}))
+
+// ── Community-wide member total (all trees combined) ──────────────────────────
+
+router.get('/:slug/stats', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await getCommunityStats(req.params['slug'] as string)
   res.json(result)
 }))
 
