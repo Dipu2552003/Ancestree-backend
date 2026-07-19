@@ -23,6 +23,11 @@ export const communitySignupSchema = z.object({
   password:     z.string().min(8, 'Password must be at least 8 characters'),
   display_name: z.string().min(1).max(100),
   invite_code:  z.string().min(1, 'An invite code is required to join this community'),
+  code:         z.string().regex(/^\d{6}$/, 'Enter the 6-digit code sent to your email'),
+})
+
+export const sendSignupCodeSchema = z.object({
+  email: z.string().email(),
 })
 
 export const inviteToCommunitySchema = z.object({
@@ -51,6 +56,7 @@ export const joinCommunitySchema = z.object({
 export type CreateCommunityInput    = z.infer<typeof createCommunitySchema>
 export type CommunityLoginInput     = z.infer<typeof communityLoginSchema>
 export type CommunitySignupInput    = z.infer<typeof communitySignupSchema>
+export type SendSignupCodeInput     = z.infer<typeof sendSignupCodeSchema>
 export type InviteToCommunityInput  = z.infer<typeof inviteToCommunitySchema>
 export type UpdateMemberRoleInput   = z.infer<typeof updateMemberRoleSchema>
 export type UpdateCommunityInput    = z.infer<typeof updateCommunitySchema>

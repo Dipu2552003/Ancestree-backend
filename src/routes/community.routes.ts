@@ -4,15 +4,17 @@ import { asyncHandler } from '../middleware/asyncHandler'
 import { validate } from '../middleware/validate'
 import {
   createCommunitySchema, communityLoginSchema, communitySignupSchema,
+  sendSignupCodeSchema,
   inviteToCommunitySchema, updateMemberRoleSchema,
   updateCommunitySchema, joinCommunitySchema,
   type CreateCommunityInput, type CommunityLoginInput, type CommunitySignupInput,
+  type SendSignupCodeInput,
   type InviteToCommunityInput, type UpdateMemberRoleInput,
   type UpdateCommunityInput, type JoinCommunityInput,
 } from '../schemas/community.schema'
 import {
   createCommunity, getCommunity, updateCommunity, deleteCommunity,
-  communityLogin, communitySignup, joinCommunity, leaveCommunity,
+  communityLogin, communitySignup, sendSignupCode, joinCommunity, leaveCommunity,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
   listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
   getMyCommunityRole, getCommunityStats,
@@ -106,6 +108,14 @@ router.post('/:slug/login', validate(communityLoginSchema), asyncHandler(async (
   res.json(result)
 }))
 
+// Step 1 of signup: email a 6-digit verification code (valid 1 hour).
+router.post('/:slug/signup/send-code', validate(sendSignupCodeSchema), asyncHandler(async (req: Request, res: Response) => {
+  const { email } = req.validated as SendSignupCodeInput
+  const result = await sendSignupCode(req.params['slug'] as string, email)
+  res.json(result)
+}))
+
+// Step 2 of signup: create the account (requires the emailed code).
 router.post('/:slug/signup', validate(communitySignupSchema), asyncHandler(async (req: Request, res: Response) => {
   const result = await communitySignup(req.params['slug'] as string, req.validated as CommunitySignupInput)
   res.status(201).json(result)

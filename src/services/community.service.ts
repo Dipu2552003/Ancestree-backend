@@ -1,8 +1,10 @@
 import bcrypt from 'bcrypt'
+import crypto from 'crypto'
 import { query } from '../utils/db'
 import { withOperation, auditCreate, captureAndUpdate, type Snapshot } from '../utils/audit'
 import { signToken } from '../utils/jwt'
 import { logger } from '../utils/logger'
+import { sendMail, brandEmail } from '../utils/email'
 import { badRequest, unauthorized, notFound, conflict, forbidden, serverError } from '../utils/errors'
 import type {
   CreateCommunityInput, CommunityLoginInput, CommunitySignupInput,
@@ -279,6 +281,59 @@ export async function communityLogin(slug: string, input: CommunityLoginInput) {
   return { token, user: { ...safeUser, family_id: fm.family_id, community_id: community.id } }
 }
 
+const SIGNUP_CODE_TTL_MS = 60 * 60 * 1000 // 1 hour
+const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex')
+
+/**
+ * Emails a 6-digit signup verification code, valid for 1 hour. Requires the
+ * community to exist and the email to be unregistered. Re-requesting replaces
+ * any prior code for that email.
+ */
+export async function sendSignupCode(slug: string, email: string) {
+  await getBySlug(slug) // 404s on unknown community
+
+  const existing = await query('SELECT id FROM users WHERE email = $1', [email])
+  if ((existing.rowCount ?? 0) > 0) throw conflict('Email already registered')
+
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0')
+  const expiresAt = new Date(Date.now() + SIGNUP_CODE_TTL_MS)
+
+  await query(
+    `INSERT INTO signup_verifications (email, code_hash, expires_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (email)
+     DO UPDATE SET code_hash = EXCLUDED.code_hash,
+                   expires_at = EXCLUDED.expires_at,
+                   created_at = NOW()`,
+    [email, sha256(code), expiresAt],
+  )
+
+  await sendMail({
+    to: email,
+    subject: 'Your Khandelwal Parivar verification code',
+    text: `Your verification code is ${code}. It expires in 1 hour.`,
+    html: brandEmail('Verify your email',
+      `<p>Your verification code is:</p>
+       <p style="font-size:30px;font-weight:800;letter-spacing:6px;color:#EA580C;margin:16px 0">${code}</p>
+       <p style="font-size:13px;color:#8a7a67">This code expires in 1 hour. If you didn't request it, ignore this email.</p>`),
+  })
+
+  return { success: true }
+}
+
+/** Consumes a valid, unexpired signup code for the email, else throws. */
+async function verifySignupCode(email: string, code: string) {
+  const { rows: [row] } = await query<{ code_hash: string }>(
+    `SELECT code_hash FROM signup_verifications
+     WHERE email = $1 AND expires_at > NOW()`,
+    [email],
+  )
+  if (!row || row.code_hash !== sha256(code)) {
+    throw badRequest('This verification code is invalid or has expired. Request a new one.')
+  }
+  await query('DELETE FROM signup_verifications WHERE email = $1', [email])
+}
+
 export async function communitySignup(slug: string, input: CommunitySignupInput) {
   const community = await getBySlug(slug)
 
@@ -318,6 +373,9 @@ export async function communitySignup(slug: string, input: CommunitySignupInput)
 
   const existing = await query('SELECT id FROM users WHERE email = $1', [input.email])
   if ((existing.rowCount ?? 0) > 0) throw conflict('Email already registered')
+
+  // Confirm the email was verified via the emailed 6-digit code (consumes it).
+  await verifySignupCode(input.email, input.code)
 
   const passwordHash = await bcrypt.hash(input.password, 10)
   const namePrefix = await uniquePrefix(buildNamePrefix(input.display_name))
