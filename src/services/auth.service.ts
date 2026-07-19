@@ -432,7 +432,8 @@ export async function requestPasswordReset(input: ForgotPasswordInput) {
       [tokenHash, expiresAt, user.id],
     )
 
-    const base = process.env.APP_BASE_URL ?? 'http://localhost:3000'
+    // Base origin for the password-reset link in the email (the frontend site).
+    const base = process.env.RESET_LINK_BASE_URL ?? 'http://localhost:3000'
     const resetLink = `${base}/reset-password?token=${rawToken}`
     await sendPasswordResetEmail(input.email, resetLink).catch(err =>
       logger.warn({ err, email: input.email }, 'sendPasswordResetEmail failed'),
