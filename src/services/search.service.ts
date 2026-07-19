@@ -157,3 +157,59 @@ export async function searchPersons(
   logger.debug({ q: term, scope, kind: caller.kind, results: rows.length }, 'search')
   return { results: rows }
 }
+
+export type PersonFilters = {
+  q?: string
+  gender?: string
+  gotra?: string
+  village?: string
+  city?: string
+  age_min?: number
+  age_max?: number
+}
+
+// Age from birth_date when known, else birth_year. NULL when neither is set.
+const AGE_EXPR = `COALESCE(
+  EXTRACT(YEAR FROM AGE(p.birth_date))::int,
+  EXTRACT(YEAR FROM CURRENT_DATE)::int - p.birth_year
+)`
+
+/**
+ * Community-wide person directory with optional filters ("Apna Parivar").
+ * Unlike searchPersons() this lists everyone in the community when no
+ * filters are given, and matches on structured fields rather than fuzzy name.
+ */
+export async function filterCommunityPersons(communityId: string, f: PersonFilters) {
+  const where = ['p.deleted_at IS NULL', 'p.community_id = $1']
+  const params: unknown[] = [communityId]
+  const add = (clause: string, value: unknown) => {
+    params.push(value)
+    where.push(clause.replace(/\?/g, `$${params.length}`))
+  }
+
+  if (f.q) add('p.full_name ILIKE ?', `%${f.q}%`)
+  if (f.gender) add('p.gender = ?', f.gender)
+  if (f.gotra) add('p.gotra ILIKE ?', f.gotra)
+  if (f.village) add('p.native_village ILIKE ?', f.village)
+  if (f.city) add('(p.current_city ILIKE ? OR p.current_state ILIKE ? OR p.current_address ILIKE ?)', `%${f.city}%`)
+  if (f.age_min !== undefined) add(`${AGE_EXPR} >= ?`, f.age_min)
+  if (f.age_max !== undefined) add(`${AGE_EXPR} <= ?`, f.age_max)
+
+  const { rows } = await query(
+    `SELECT p.id, p.full_name, p.gender, p.gotra, p.birth_year,
+            ${AGE_EXPR} AS age,
+            p.native_village, p.current_city, p.current_state,
+            p.photo_url, p.node_state,
+            f.name AS family_name,
+            father.full_name AS father_name
+     FROM   persons p
+     JOIN   families f ON f.id = p.primary_family_id AND f.deleted_at IS NULL
+     ${FATHER_SUBQUERY}
+     WHERE  ${where.join('\n       AND ')}
+     ORDER  BY p.full_name
+     LIMIT  200`,
+    params,
+  )
+  logger.debug({ communityId, filters: f, results: rows.length }, 'parivar filter')
+  return { results: rows }
+}

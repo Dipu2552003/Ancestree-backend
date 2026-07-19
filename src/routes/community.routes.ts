@@ -18,7 +18,7 @@ import {
   getMyCommunityRole, getCommunityStats,
 } from '../services/community.service'
 import { listCommunityMerges, forceMerge } from '../services/merge'
-import { searchPersons } from '../services/search.service'
+import { searchPersons, filterCommunityPersons } from '../services/search.service'
 import { query } from '../utils/db'
 
 const router = Router()
@@ -140,6 +140,26 @@ router.get('/:slug/search', requireAuth, asyncHandler(async (req: Request, res: 
   const q = typeof req.query.q === 'string' ? req.query.q : ''
   const community = await getCommunity(req.params['slug'] as string)
   const results = await searchPersons(q, req.user.familyId, 'external', community.id)
+  res.json(results)
+}))
+
+// ── Community-wide person directory with filters ("Apna Parivar") ────────────
+
+router.get('/:slug/persons', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const community = await getCommunity(req.params['slug'] as string)
+  const str = (k: string) => {
+    const v = req.query[k]
+    return typeof v === 'string' && v.trim() ? v.trim() : undefined
+  }
+  const num = (k: string) => {
+    const v = Number(req.query[k])
+    return typeof req.query[k] === 'string' && Number.isFinite(v) ? v : undefined
+  }
+  const results = await filterCommunityPersons(community.id, {
+    q: str('q'), gender: str('gender'), gotra: str('gotra'),
+    village: str('village'), city: str('city'),
+    age_min: num('age_min'), age_max: num('age_max'),
+  })
   res.json(results)
 }))
 

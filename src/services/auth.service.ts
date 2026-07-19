@@ -1,5 +1,6 @@
 import bcrypt from 'bcrypt'
 import crypto from 'crypto'
+import nodemailer from 'nodemailer'
 import { query } from '../utils/db'
 import { withOperation, captureAndUpdate, auditCreate, type Snapshot } from '../utils/audit'
 import { signToken } from '../utils/jwt'
@@ -398,10 +399,45 @@ function sha256(input: string): string {
  * respond with the same "if that email exists, a link was sent" message
  * regardless of whether the account exists, which avoids email enumeration.
  */
+// One shared SMTP transport (Brevo). Built lazily so the app still boots if
+// SMTP isn't configured — in that case we log the link instead of sending.
+let mailer: nodemailer.Transporter | null = null
+function getMailer(): nodemailer.Transporter | null {
+  if (mailer) return mailer
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return null
+  mailer = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: Number(SMTP_PORT ?? 587),
+    secure: false, // Brevo uses STARTTLS on 587
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  })
+  return mailer
+}
+
 async function sendPasswordResetEmail(email: string, resetLink: string) {
-  logger.info({ email, resetLink }, 'TODO: integrate email provider — password reset link')
-  // eslint-disable-next-line no-console
-  console.log(`\n[password-reset] ${email} → ${resetLink}\n`)
+  const transport = getMailer()
+  if (!transport) {
+    logger.warn({ email, resetLink }, 'SMTP not configured — logging reset link instead of sending')
+    // eslint-disable-next-line no-console
+    console.log(`\n[password-reset] ${email} → ${resetLink}\n`)
+    return
+  }
+  await transport.sendMail({
+    from: process.env.EMAIL_FROM ?? process.env.SMTP_USER,
+    to: email,
+    subject: 'Reset your Khandelwal Parivar password',
+    text: `Reset your password using this link (expires shortly):\n\n${resetLink}\n\nIf you didn't request this, ignore this email.`,
+    html: `<div style="font-family:system-ui,sans-serif;line-height:1.6;color:#3f2d1e">
+             <h2 style="color:#7A1315;margin:0 0 12px">Reset your password</h2>
+             <p>Tap the button below to set a new password. The link expires shortly.</p>
+             <p style="margin:24px 0">
+               <a href="${resetLink}" style="background:#EA580C;color:#fff;text-decoration:none;padding:12px 22px;border-radius:999px;font-weight:600">Reset my password</a>
+             </p>
+             <p style="font-size:13px;color:#8a7a67">If you didn't request this, you can safely ignore this email.</p>
+           </div>`,
+  })
+  logger.info({ email }, 'password reset email sent')
 }
 
 export async function requestPasswordReset(input: ForgotPasswordInput) {
