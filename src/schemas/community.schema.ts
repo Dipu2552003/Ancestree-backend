@@ -24,10 +24,21 @@ export const communitySignupSchema = z.object({
   display_name: z.string().min(1).max(100),
   invite_code:  z.string().min(1, 'An invite code is required to join this community'),
   code:         z.string().regex(/^\d{6}$/, 'Enter the 6-digit code sent to your email'),
+  // Profile fields collected on the final signup step (all optional).
+  gotra:          z.string().max(60).optional(),
+  native_village: z.string().max(120).optional(),
+  current_city:   z.string().max(120).optional(),
+  photo_url:      z.string().optional(), // base64 data URL or http(s) URL
 })
 
 export const sendSignupCodeSchema = z.object({
   email: z.string().email(),
+})
+
+// Standalone OTP-confirm step: checks the code without consuming it.
+export const verifySignupCodeSchema = z.object({
+  email: z.string().email(),
+  code:  z.string().regex(/^\d{6}$/, 'Enter the 6-digit code sent to your email'),
 })
 
 export const inviteToCommunitySchema = z.object({
@@ -57,6 +68,7 @@ export type CreateCommunityInput    = z.infer<typeof createCommunitySchema>
 export type CommunityLoginInput     = z.infer<typeof communityLoginSchema>
 export type CommunitySignupInput    = z.infer<typeof communitySignupSchema>
 export type SendSignupCodeInput     = z.infer<typeof sendSignupCodeSchema>
+export type VerifySignupCodeInput   = z.infer<typeof verifySignupCodeSchema>
 export type InviteToCommunityInput  = z.infer<typeof inviteToCommunitySchema>
 export type UpdateMemberRoleInput   = z.infer<typeof updateMemberRoleSchema>
 export type UpdateCommunityInput    = z.infer<typeof updateCommunitySchema>

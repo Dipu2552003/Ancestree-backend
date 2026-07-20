@@ -321,6 +321,20 @@ export async function sendSignupCode(slug: string, email: string) {
   return { success: true }
 }
 
+/** Checks a signup code is valid & unexpired WITHOUT consuming it. Powers the
+ *  standalone OTP-confirm step; the code is consumed later at communitySignup. */
+export async function peekSignupCode(email: string, code: string) {
+  const { rows: [row] } = await query<{ code_hash: string }>(
+    `SELECT code_hash FROM signup_verifications
+     WHERE email = $1 AND expires_at > NOW()`,
+    [email],
+  )
+  if (!row || row.code_hash !== sha256(code)) {
+    throw badRequest('This verification code is invalid or has expired. Request a new one.')
+  }
+  return { success: true }
+}
+
 /** Consumes a valid, unexpired signup code for the email, else throws. */
 async function verifySignupCode(email: string, code: string) {
   const { rows: [row] } = await query<{ code_hash: string }>(
@@ -408,9 +422,11 @@ export async function communitySignup(slug: string, input: CommunitySignupInput)
     const { rows: [person] } = await tx.query<Snapshot & { id: string }>(
       `INSERT INTO persons
          (person_code, primary_family_id, full_name, node_state, claimed_by, created_by,
-          visibility, community_id)
-       VALUES ($1, $2, $3, 'claimed', $4, $4, 'community', $5) RETURNING *`,
-      [personCode, family.id, input.display_name, user.id, community.id],
+          visibility, community_id, gotra, native_village, current_city, photo_url)
+       VALUES ($1, $2, $3, 'claimed', $4, $4, 'community', $5, $6, $7, $8, $9) RETURNING *`,
+      [personCode, family.id, input.display_name, user.id, community.id,
+       input.gotra ?? null, input.native_village ?? null,
+       input.current_city ?? null, input.photo_url || null],
     )
     await auditCreate(op, 'person', person)
 

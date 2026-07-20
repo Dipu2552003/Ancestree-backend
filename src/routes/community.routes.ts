@@ -4,17 +4,17 @@ import { asyncHandler } from '../middleware/asyncHandler'
 import { validate } from '../middleware/validate'
 import {
   createCommunitySchema, communityLoginSchema, communitySignupSchema,
-  sendSignupCodeSchema,
+  sendSignupCodeSchema, verifySignupCodeSchema,
   inviteToCommunitySchema, updateMemberRoleSchema,
   updateCommunitySchema, joinCommunitySchema,
   type CreateCommunityInput, type CommunityLoginInput, type CommunitySignupInput,
-  type SendSignupCodeInput,
+  type SendSignupCodeInput, type VerifySignupCodeInput,
   type InviteToCommunityInput, type UpdateMemberRoleInput,
   type UpdateCommunityInput, type JoinCommunityInput,
 } from '../schemas/community.schema'
 import {
   createCommunity, getCommunity, updateCommunity, deleteCommunity,
-  communityLogin, communitySignup, sendSignupCode, joinCommunity, leaveCommunity,
+  communityLogin, communitySignup, sendSignupCode, peekSignupCode, joinCommunity, leaveCommunity,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
   listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
   getMyCommunityRole, getCommunityStats,
@@ -112,6 +112,14 @@ router.post('/:slug/login', validate(communityLoginSchema), asyncHandler(async (
 router.post('/:slug/signup/send-code', validate(sendSignupCodeSchema), asyncHandler(async (req: Request, res: Response) => {
   const { email } = req.validated as SendSignupCodeInput
   const result = await sendSignupCode(req.params['slug'] as string, email)
+  res.json(result)
+}))
+
+// Step 1b of signup: confirm the emailed code before showing later steps.
+// Does not consume the code — communitySignup consumes it at the final submit.
+router.post('/:slug/signup/verify-code', validate(verifySignupCodeSchema), asyncHandler(async (req: Request, res: Response) => {
+  const { email, code } = req.validated as VerifySignupCodeInput
+  const result = await peekSignupCode(email, code)
   res.json(result)
 }))
 
