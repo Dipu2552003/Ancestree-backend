@@ -32,7 +32,8 @@ export const communitySignupSchema = z.object({
 })
 
 export const sendSignupCodeSchema = z.object({
-  email: z.string().email(),
+  email:       z.string().email(),
+  invite_code: z.string().min(1, 'An invite code is required to join this community'),
 })
 
 // Standalone OTP-confirm step: checks the code without consuming it.

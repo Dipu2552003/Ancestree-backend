@@ -110,8 +110,8 @@ router.post('/:slug/login', validate(communityLoginSchema), asyncHandler(async (
 
 // Step 1 of signup: email a 6-digit verification code (valid 1 hour).
 router.post('/:slug/signup/send-code', validate(sendSignupCodeSchema), asyncHandler(async (req: Request, res: Response) => {
-  const { email } = req.validated as SendSignupCodeInput
-  const result = await sendSignupCode(req.params['slug'] as string, email)
+  const { email, invite_code } = req.validated as SendSignupCodeInput
+  const result = await sendSignupCode(req.params['slug'] as string, email, invite_code)
   res.json(result)
 }))
 

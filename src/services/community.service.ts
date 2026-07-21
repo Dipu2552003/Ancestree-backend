@@ -284,13 +284,35 @@ export async function communityLogin(slug: string, input: CommunityLoginInput) {
 const SIGNUP_CODE_TTL_MS = 60 * 60 * 1000 // 1 hour
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex')
 
+/** Validates an invite/join code for a community. Returns the
+ *  community_invites row id for a targeted single-use invite (so the caller can
+ *  consume it later), or null for the community's permanent join_code. Throws
+ *  badRequest if the code is invalid or expired. */
+async function resolveInviteCode(communityId: string, inviteCode: string): Promise<string | null> {
+  const { rows: [invite] } = await query<{ id: string }>(
+    `SELECT id FROM community_invites
+     WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
+       AND  (expires_at IS NULL OR expires_at > NOW())`,
+    [inviteCode, communityId],
+  )
+  if (invite) return invite.id
+
+  const { rows: [joinMatch] } = await query<{ id: string }>(
+    `SELECT id FROM communities WHERE id = $1 AND join_code = $2`,
+    [communityId, inviteCode],
+  )
+  if (!joinMatch) throw badRequest('Invalid or expired invite code')
+  return null
+}
+
 /**
  * Emails a 6-digit signup verification code, valid for 1 hour. Requires the
- * community to exist and the email to be unregistered. Re-requesting replaces
- * any prior code for that email.
+ * community to exist, a valid invite code, and the email to be unregistered.
+ * Re-requesting replaces any prior code for that email.
  */
-export async function sendSignupCode(slug: string, email: string) {
-  await getBySlug(slug) // 404s on unknown community
+export async function sendSignupCode(slug: string, email: string, inviteCode: string) {
+  const community = await getBySlug(slug) // 404s on unknown community
+  await resolveInviteCode(community.id, inviteCode) // 400s before we email anything
 
   const existing = await query('SELECT id FROM users WHERE email = $1', [email])
   if ((existing.rowCount ?? 0) > 0) throw conflict('Email already registered')
@@ -362,28 +384,10 @@ export async function communitySignup(slug: string, input: CommunitySignupInput)
     }
   }
 
-  // Invite code is required — open signup is disabled for communities.
+  // Invite code is required — open signup is disabled for communities. Accepts
+  // either a targeted single-use invite or the community's permanent join_code.
   if (!input.invite_code) throw badRequest('An invite code is required to join this community')
-
-  // Accept either a targeted community_invites code (single-use) or the
-  // community's own permanent join_code (reusable — no used_by tracking).
-  let inviteId: string | null = null
-
-  const { rows: [invite] } = await query<{ id: string }>(
-    `SELECT id FROM community_invites
-     WHERE  invite_code = $1 AND community_id = $2 AND used_by IS NULL
-       AND  (expires_at IS NULL OR expires_at > NOW())`,
-    [input.invite_code, community.id],
-  )
-  if (invite) {
-    inviteId = invite.id
-  } else {
-    const { rows: [joinMatch] } = await query<{ id: string }>(
-      `SELECT id FROM communities WHERE id = $1 AND join_code = $2`,
-      [community.id, input.invite_code],
-    )
-    if (!joinMatch) throw badRequest('Invalid or expired invite code')
-  }
+  const inviteId = await resolveInviteCode(community.id, input.invite_code)
 
   const existing = await query('SELECT id FROM users WHERE email = $1', [input.email])
   if ((existing.rowCount ?? 0) > 0) throw conflict('Email already registered')
