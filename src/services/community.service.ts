@@ -370,6 +370,99 @@ async function verifySignupCode(email: string, code: string) {
   await query('DELETE FROM signup_verifications WHERE email = $1', [email])
 }
 
+// ── Login via one-time code (OTP) ────────────────────────────────────────────
+// An alternative to password login: email a 6-digit code to a registered member,
+// then exchange it for a session. Reuses the signup_verifications table (email-
+// keyed, single active code) since a login OTP is just as transient.
+
+const LOGIN_OTP_TTL_MS = 10 * 60 * 1000 // 10 minutes
+
+/** Emails a 6-digit login code to a registered member of this community. To
+ *  avoid leaking which emails exist, always resolves { success: true }; a code
+ *  is only actually sent when the email belongs to a member of the community. */
+export async function sendLoginOtp(slug: string, email: string) {
+  const community = await getBySlug(slug) // 404s on unknown community
+
+  const { rows: [user] } = await query<{ id: string }>(
+    `SELECT id FROM users WHERE email = $1`, [email],
+  )
+  if (user) {
+    const { rows: [member] } = await query<{ role: string }>(
+      `SELECT role FROM community_members WHERE community_id = $1 AND user_id = $2`,
+      [community.id, user.id],
+    )
+    if (member) {
+      const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0')
+      const expiresAt = new Date(Date.now() + LOGIN_OTP_TTL_MS)
+      await query(
+        `INSERT INTO signup_verifications (email, code_hash, expires_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (email)
+         DO UPDATE SET code_hash = EXCLUDED.code_hash,
+                       expires_at = EXCLUDED.expires_at,
+                       created_at = NOW()`,
+        [email, sha256(code), expiresAt],
+      )
+      await sendMail({
+        to: email,
+        subject: 'Your Khandelwal Parivar login code',
+        text: `Your login code is ${code}. It expires in 10 minutes. If you didn't request it, ignore this email.`,
+        html: brandEmail('Your login code',
+          `<p>Use this code to sign in:</p>
+           <p style="font-size:30px;font-weight:800;letter-spacing:6px;color:#EA580C;margin:16px 0">${code}</p>
+           <p style="font-size:13px;color:#8a7a67">This code expires in 10 minutes. If you didn't request it, you can safely ignore this email.</p>`),
+      })
+      logger.info({ email, slug }, 'login OTP sent')
+    }
+  }
+  return { success: true }
+}
+
+/** Verifies a login OTP and issues a session (same shape as communityLogin). */
+export async function loginWithOtp(slug: string, email: string, code: string) {
+  const community = await getBySlug(slug)
+
+  const { rows: [row] } = await query<{ code_hash: string }>(
+    `SELECT code_hash FROM signup_verifications WHERE email = $1 AND expires_at > NOW()`,
+    [email],
+  )
+  if (!row || row.code_hash !== sha256(code)) {
+    throw badRequest('This login code is invalid or has expired. Request a new one.')
+  }
+
+  const { rows: [user] } = await query<{
+    id: string; email: string; display_name: string; person_id: string
+  }>(
+    `SELECT id, email, display_name, person_id FROM users WHERE email = $1`,
+    [email],
+  )
+  if (!user) throw unauthorized('Invalid email or code')
+
+  const { rows: [member] } = await query<{ role: string }>(
+    `SELECT role FROM community_members WHERE community_id = $1 AND user_id = $2`,
+    [community.id, user.id],
+  )
+  if (!member) throw forbidden('You are not a member of this community')
+
+  const { rows: [fm] } = await query<{ family_id: string }>(
+    `SELECT fm.family_id
+     FROM   family_members fm
+     JOIN   families f ON f.id = fm.family_id AND f.deleted_at IS NULL
+     WHERE  fm.user_id = $1 AND f.community_id = $2
+     ORDER  BY fm.joined_at ASC
+     LIMIT  1`,
+    [user.id, community.id],
+  )
+  if (!fm) throw serverError('No family found for user in this community')
+
+  // Consume the code now that the login is fully validated.
+  await query('DELETE FROM signup_verifications WHERE email = $1', [email])
+
+  const token = signToken({ userId: user.id, familyId: fm.family_id, communityId: community.id })
+  logger.info({ userId: user.id, communityId: community.id, slug }, 'community login via OTP')
+  return { token, user: { ...user, family_id: fm.family_id, community_id: community.id } }
+}
+
 export async function communitySignup(slug: string, input: CommunitySignupInput) {
   const community = await getBySlug(slug)
 

@@ -5,22 +5,26 @@ import { validate } from '../middleware/validate'
 import {
   createCommunitySchema, communityLoginSchema, communitySignupSchema,
   sendSignupCodeSchema, verifySignupCodeSchema,
+  sendLoginOtpSchema, verifyLoginOtpSchema,
   inviteToCommunitySchema, updateMemberRoleSchema,
   updateCommunitySchema, joinCommunitySchema,
   type CreateCommunityInput, type CommunityLoginInput, type CommunitySignupInput,
   type SendSignupCodeInput, type VerifySignupCodeInput,
+  type SendLoginOtpInput, type VerifyLoginOtpInput,
   type InviteToCommunityInput, type UpdateMemberRoleInput,
   type UpdateCommunityInput, type JoinCommunityInput,
 } from '../schemas/community.schema'
 import {
   createCommunity, getCommunity, updateCommunity, deleteCommunity,
   communityLogin, communitySignup, sendSignupCode, peekSignupCode, joinCommunity, leaveCommunity,
+  sendLoginOtp, loginWithOtp,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
   listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
   getMyCommunityRole, getCommunityStats,
 } from '../services/community.service'
 import { listCommunityMerges, forceMerge } from '../services/merge'
 import { searchPersons, filterCommunityPersons } from '../services/search.service'
+import { authLimiter } from '../middleware/rateLimit'
 import { query } from '../utils/db'
 
 const router = Router()
@@ -103,8 +107,23 @@ router.get('/:slug/invite/:code', asyncHandler(async (req: Request, res: Respons
 
 // ── Community-scoped auth ─────────────────────────────────────────────────────
 
-router.post('/:slug/login', validate(communityLoginSchema), asyncHandler(async (req: Request, res: Response) => {
+router.post('/:slug/login', authLimiter, validate(communityLoginSchema), asyncHandler(async (req: Request, res: Response) => {
   const result = await communityLogin(req.params['slug'] as string, req.validated as CommunityLoginInput)
+  res.json(result)
+}))
+
+// Login via OTP — step 1: email a 6-digit login code (valid 10 min). Always
+// responds 200 to avoid leaking which emails are registered.
+router.post('/:slug/login/send-otp', authLimiter, validate(sendLoginOtpSchema), asyncHandler(async (req: Request, res: Response) => {
+  const { email } = req.validated as SendLoginOtpInput
+  const result = await sendLoginOtp(req.params['slug'] as string, email)
+  res.json(result)
+}))
+
+// Login via OTP — step 2: exchange the code for a session ({ token, user }).
+router.post('/:slug/login/verify-otp', authLimiter, validate(verifyLoginOtpSchema), asyncHandler(async (req: Request, res: Response) => {
+  const { email, code } = req.validated as VerifyLoginOtpInput
+  const result = await loginWithOtp(req.params['slug'] as string, email, code)
   res.json(result)
 }))
 

@@ -42,6 +42,16 @@ export const verifySignupCodeSchema = z.object({
   code:  z.string().regex(/^\d{6}$/, 'Enter the 6-digit code sent to your email'),
 })
 
+// Login via one-time code: request an OTP, then exchange it for a session.
+export const sendLoginOtpSchema = z.object({
+  email: z.string().email(),
+})
+
+export const verifyLoginOtpSchema = z.object({
+  email: z.string().email(),
+  code:  z.string().regex(/^\d{6}$/, 'Enter the 6-digit code sent to your email'),
+})
+
 export const inviteToCommunitySchema = z.object({
   invited_email:   z.string().email().optional(),
   role:            z.enum(['admin', 'member']).default('member'),
@@ -70,6 +80,8 @@ export type CommunityLoginInput     = z.infer<typeof communityLoginSchema>
 export type CommunitySignupInput    = z.infer<typeof communitySignupSchema>
 export type SendSignupCodeInput     = z.infer<typeof sendSignupCodeSchema>
 export type VerifySignupCodeInput   = z.infer<typeof verifySignupCodeSchema>
+export type SendLoginOtpInput       = z.infer<typeof sendLoginOtpSchema>
+export type VerifyLoginOtpInput     = z.infer<typeof verifyLoginOtpSchema>
 export type InviteToCommunityInput  = z.infer<typeof inviteToCommunitySchema>
 export type UpdateMemberRoleInput   = z.infer<typeof updateMemberRoleSchema>
 export type UpdateCommunityInput    = z.infer<typeof updateCommunitySchema>
