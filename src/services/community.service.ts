@@ -360,7 +360,7 @@ export async function peekSignupCode(email: string, code: string) {
 }
 
 /** Consumes a valid, unexpired signup code for the email, else throws. */
-async function verifySignupCode(email: string, code: string) {
+export async function verifySignupCode(email: string, code: string) {
   const { rows: [row] } = await query<{ code_hash: string }>(
     `SELECT code_hash FROM signup_verifications
      WHERE email = $1 AND expires_at > NOW()`,

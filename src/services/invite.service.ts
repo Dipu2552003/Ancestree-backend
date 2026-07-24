@@ -1,9 +1,57 @@
+import crypto from 'crypto'
 import { query } from '../utils/db'
 import { withOperation, captureAndUpdate } from '../utils/audit'
 import { logger } from '../utils/logger'
+import { sendMail, brandEmail } from '../utils/email'
 import { notFound, conflict, unauthorized } from '../utils/errors'
 import * as personsRepo from '../repositories/persons.repo'
 import * as familyMembersRepo from '../repositories/familyMembers.repo'
+
+// How long an invite token stays claimable after it's generated. Kept short for
+// security, but long enough to survive an email-OTP round-trip on the branded
+// claim flow (previously 5 minutes, which the OTP wait could easily exceed).
+const INVITE_WINDOW = "NOW() - INTERVAL '7 days'"
+
+const SIGNUP_CODE_TTL_MS = 60 * 60 * 1000 // 1 hour — matches community signup OTP
+const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex')
+
+/**
+ * Emails a 6-digit OTP for the branded node-claim flow. Validates the invite
+ * token and that the email is unregistered BEFORE sending, so a bad token or an
+ * already-registered email never triggers mail. Re-requesting replaces any prior
+ * code for that email (shared signup_verifications table with community signup).
+ */
+export async function sendClaimCode(token: string, email: string) {
+  await lookupToken(token) // 404/409s on an invalid, expired, or claimed token
+
+  const existing = await query('SELECT id FROM users WHERE email = $1', [email])
+  if ((existing.rowCount ?? 0) > 0) throw conflict('Email already registered')
+
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0')
+  const expiresAt = new Date(Date.now() + SIGNUP_CODE_TTL_MS)
+
+  await query(
+    `INSERT INTO signup_verifications (email, code_hash, expires_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (email)
+     DO UPDATE SET code_hash = EXCLUDED.code_hash,
+                   expires_at = EXCLUDED.expires_at,
+                   created_at = NOW()`,
+    [email, sha256(code), expiresAt],
+  )
+
+  await sendMail({
+    to: email,
+    subject: 'Your Khandelwal Parivar verification code',
+    text: `Your verification code is ${code}. It expires in 1 hour.`,
+    html: brandEmail('Verify your email',
+      `<p>Your verification code is:</p>
+       <p style="font-size:30px;font-weight:800;letter-spacing:6px;color:#EA580C;margin:16px 0">${code}</p>
+       <p style="font-size:13px;color:#8a7a67">This code expires in 1 hour. If you didn't request it, ignore this email.</p>`),
+  })
+
+  return { success: true }
+}
 
 export async function claimByToken(token: string, userId: string) {
   // The JWT can outlive the user row it references (e.g. after a database
@@ -48,7 +96,7 @@ export async function claimByToken(token: string, userId: string) {
     `SELECT id, full_name, node_state, claimed_by, primary_family_id, is_alive, community_id
      FROM persons
      WHERE invite_token = $1 AND deleted_at IS NULL
-       AND invite_sent_at > NOW() - INTERVAL '5 minutes'`,
+       AND invite_sent_at > ${INVITE_WINDOW}`,
     [token.toUpperCase()]
   )
 
@@ -141,7 +189,7 @@ export async function lookupToken(token: string) {
        LIMIT 1
      ) inv_father ON true
      WHERE p.invite_token = $1 AND p.deleted_at IS NULL
-       AND p.invite_sent_at > NOW() - INTERVAL '5 minutes'`,
+       AND p.invite_sent_at > ${INVITE_WINDOW}`,
     [token.toUpperCase()]
   )
 

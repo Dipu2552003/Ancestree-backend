@@ -10,6 +10,7 @@ import {
   ForgotPasswordInput, ResetPasswordInput,
 } from '../schemas/auth.schema'
 import { createNotification } from './notification.service'
+import { verifySignupCode } from './community.service'
 import { logger } from '../utils/logger'
 import { badRequest, unauthorized, forbidden, notFound, conflict, serverError } from '../utils/errors'
 
@@ -186,7 +187,17 @@ export async function login(input: LoginInput) {
   return { token, user: { ...safeUser, family_id: member.family_id } }
 }
 
-export async function signupViaInvite(input: SignupInput & { invite_token: string }) {
+export async function signupViaInvite(
+  input: SignupInput & {
+    invite_token: string
+    // OTP from the branded claim flow. Optional so the legacy Ancestree /invite
+    // page (no email verification) keeps working; when present it's verified and
+    // consumed before the account is created.
+    code?: string
+    // Profile fields collected on the final claim step, persisted onto the node.
+    gotra?: string; native_village?: string; current_city?: string; photo_url?: string
+  },
+) {
   const existing = await query('SELECT id FROM users WHERE email = $1', [input.email])
   if ((existing.rowCount ?? 0) > 0) throw conflict('Email already registered')
 
@@ -195,11 +206,14 @@ export async function signupViaInvite(input: SignupInput & { invite_token: strin
   }>(
     `SELECT id, primary_family_id, node_state, community_id FROM persons
      WHERE invite_token = $1 AND deleted_at IS NULL
-       AND invite_sent_at > NOW() - INTERVAL '5 minutes'`,
+       AND invite_sent_at > NOW() - INTERVAL '7 days'`,
     [input.invite_token.toUpperCase()]
   )
   if (!person) throw notFound('Invalid or expired invite code')
   if (person.node_state === 'claimed') throw conflict('This node has already been claimed')
+
+  // Confirm the email was verified via the emailed 6-digit code (consumes it).
+  if (input.code) await verifySignupCode(input.email, input.code)
 
   const passwordHash = await bcrypt.hash(input.password, 10)
 
@@ -218,7 +232,14 @@ export async function signupViaInvite(input: SignupInput & { invite_token: strin
 
       await captureAndUpdate(op, 'person',
         { sql: 'id = $1', params: [person.id] },
-        { sql: `node_state = 'claimed', claimed_by = $1, invite_token = NULL, updated_at = NOW()`, params: [user.id] },
+        { sql: `node_state = 'claimed', claimed_by = $1, invite_token = NULL,
+                gotra          = COALESCE($2, gotra),
+                native_village = COALESCE($3, native_village),
+                current_city   = COALESCE($4, current_city),
+                photo_url      = COALESCE($5, photo_url),
+                updated_at = NOW()`,
+          params: [user.id, input.gotra ?? null, input.native_village ?? null,
+                   input.current_city ?? null, input.photo_url || null] },
       )
 
       const { rows: [membership] } = await tx.query<Snapshot>(
