@@ -69,6 +69,7 @@ export const updateCommunitySchema = z.object({
                   .optional(),
   description:  z.string().max(500).optional(),
   member_limit: z.number().int().min(0).optional(),
+  site_url:    z.string().url().max(255).nullable().optional(),
 })
 
 export const joinCommunitySchema = z.object({

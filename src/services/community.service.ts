@@ -17,6 +17,7 @@ import type {
 interface CommunityRow {
   id: string; name: string; slug: string
   description: string | null; owner_id: string; member_limit: number
+  site_url: string | null
 }
 
 interface CommunityPublic extends CommunityRow {
@@ -25,7 +26,7 @@ interface CommunityPublic extends CommunityRow {
 
 async function getBySlug(slug: string): Promise<CommunityRow> {
   const { rows: [community] } = await query<CommunityRow>(
-    `SELECT id, name, slug, description, owner_id, member_limit
+    `SELECT id, name, slug, description, owner_id, member_limit, site_url
      FROM communities WHERE slug = $1`,
     [slug],
   )
@@ -160,7 +161,7 @@ export async function createCommunity(input: CreateCommunityInput) {
 
 export async function getCommunity(slug: string): Promise<CommunityPublic> {
   const { rows: [community] } = await query<CommunityPublic>(
-    `SELECT c.id, c.name, c.slug, c.description, c.owner_id, c.member_limit,
+    `SELECT c.id, c.name, c.slug, c.description, c.owner_id, c.member_limit, c.site_url,
             COUNT(cm.user_id)::int AS member_count
      FROM   communities c
      LEFT   JOIN community_members cm ON cm.community_id = c.id
@@ -196,6 +197,7 @@ export async function updateCommunity(
   if (input.slug         !== undefined) { setClauses.push(`slug = $${idx++}`);         params.push(input.slug) }
   if (input.description  !== undefined) { setClauses.push(`description = $${idx++}`);  params.push(input.description) }
   if (input.member_limit !== undefined) { setClauses.push(`member_limit = $${idx++}`); params.push(input.member_limit) }
+  if (input.site_url     !== undefined) { setClauses.push(`site_url = $${idx++}`);     params.push(input.site_url) }
 
   if (setClauses.length === 0) return community
 
@@ -203,7 +205,7 @@ export async function updateCommunity(
   params.push(community.id)
 
   const { rows: [updated] } = await query<CommunityRow>(
-    `UPDATE communities SET ${setClauses.join(', ')} WHERE id = $${idx} RETURNING id, name, slug, description, owner_id, member_limit`,
+    `UPDATE communities SET ${setClauses.join(', ')} WHERE id = $${idx} RETURNING id, name, slug, description, owner_id, member_limit, site_url`,
     params,
   )
 
@@ -781,11 +783,11 @@ export async function getJoinCode(slug: string, requesterId: string) {
   const community = await getBySlug(slug)
   await assertAdmin(community.id, requesterId)
 
-  const { rows: [row] } = await query<{ join_code: string }>(
-    `SELECT join_code FROM communities WHERE id = $1`,
+  const { rows: [row] } = await query<{ join_code: string; site_url: string | null }>(
+    `SELECT join_code, site_url FROM communities WHERE id = $1`,
     [community.id],
   )
-  return { join_code: row.join_code, community_slug: slug }
+  return { join_code: row.join_code, community_slug: slug, site_url: row.site_url }
 }
 
 export async function resetJoinCode(slug: string, requesterId: string) {
