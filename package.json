@@ -10,7 +10,8 @@
     "dev": "ts-node src/index.ts",
     "build": "tsc && node scripts/copy-sql.js",
     "start": "node dist/src/index.js",
-    "verify:recovery": "ts-node database/verifyRecovery.ts"
+    "verify:recovery": "ts-node database/verifyRecovery.ts",
+    "check:owners": "ts-node scripts/check-owner-dupes.ts"
   },
   "dependencies": {
     "@types/bcrypt": "^6.0.0",

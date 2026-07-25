@@ -98,6 +98,16 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}) })
     return
   }
+  // Postgres unique-violation on the 1:1 ownership indexes (028): a concurrent
+  // claim lost the race. Surface it as a clean 409 rather than a confusing 500.
+  if (typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505') {
+    const constraint = (err as { constraint?: string }).constraint
+    if (constraint === 'uq_persons_claimed_by' || constraint === 'uq_users_person_id') {
+      logger.warn({ constraint }, 'ownership uniqueness violation')
+      res.status(409).json({ error: 'This node has already been claimed', code: 'claimed_node' })
+      return
+    }
+  }
   logger.error({ err }, 'unhandled error')
   res.status(500).json({ error: 'Internal server error' })
 })

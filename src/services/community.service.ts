@@ -714,12 +714,20 @@ export async function getCommunityMembers(slug: string, requesterId: string) {
   const community = await getBySlug(slug)
   await assertAdmin(community.id, requesterId)
 
+  // Admin directory of everyone who has signed up: name, email, photo and their
+  // own person node (so the UI can deep-link to their tree). Newest signup first
+  // — joined_at is when they joined the community, i.e. when they signed up.
   const { rows } = await query(
-    `SELECT u.id, u.email, u.display_name, cm.role, cm.joined_at
+    `SELECT u.id, u.email, u.display_name, cm.role, cm.joined_at,
+            u.person_id,
+            p.full_name  AS person_name,
+            p.photo_url,
+            p.primary_family_id AS family_id
      FROM   community_members cm
-     JOIN   users u ON u.id = cm.user_id
+     JOIN   users   u ON u.id = cm.user_id
+     LEFT   JOIN persons p ON p.id = u.person_id AND p.deleted_at IS NULL
      WHERE  cm.community_id = $1
-     ORDER  BY CASE cm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, cm.joined_at`,
+     ORDER  BY cm.joined_at DESC`,
     [community.id],
   )
   return { members: rows }
@@ -811,13 +819,27 @@ export async function listCommunityFamilies(slug: string, requesterId: string) {
 
   const { rows } = await query(
     `SELECT f.id, f.name, f.name_prefix, f.created_at,
-            COUNT(DISTINCT p.id)::int   AS person_count,
-            COUNT(DISTINCT fm.user_id)::int AS member_count
+            COUNT(DISTINCT p.id)::int       AS person_count,
+            COUNT(DISTINCT fm.user_id)::int AS member_count,
+            rep.person_id AS view_person_id,
+            rep.full_name AS view_person_name
      FROM   families f
      LEFT   JOIN persons p         ON p.primary_family_id = f.id AND p.deleted_at IS NULL
      LEFT   JOIN family_members fm ON fm.family_id = f.id
+     -- A representative person to open when the admin clicks the family: prefer a
+     -- claimed (owned) node, then the family creator's, then anyone — so the click
+     -- always lands somewhere real in that tree.
+     LEFT   JOIN LATERAL (
+       SELECT rp.id AS person_id, rp.full_name
+       FROM   persons rp
+       WHERE  rp.primary_family_id = f.id AND rp.deleted_at IS NULL
+       ORDER  BY (rp.node_state = 'claimed') DESC,
+                 (rp.created_by = f.created_by) DESC,
+                 rp.person_code
+       LIMIT 1
+     ) rep ON true
      WHERE  f.community_id = $1 AND f.deleted_at IS NULL
-     GROUP  BY f.id
+     GROUP  BY f.id, rep.person_id, rep.full_name
      ORDER  BY f.created_at DESC`,
     [community.id],
   )
