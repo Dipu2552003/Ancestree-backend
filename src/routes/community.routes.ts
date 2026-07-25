@@ -22,7 +22,7 @@ import {
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
   listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
   getMyCommunityRole, getCommunityStats, getCommunityHealth,
-  revokeNodeOwnership, adminDeleteNode,
+  revokeNodeOwnership, adminDeleteNode, deleteUserAccount,
 } from '../services/community.service'
 import { listCommunityMerges, forceMerge } from '../services/merge'
 import { searchPersons, filterCommunityPersons } from '../services/search.service'
@@ -299,6 +299,12 @@ router.post('/:slug/nodes/:personId/revoke-ownership', requireAuth, asyncHandler
 // auto-removed.
 router.delete('/:slug/nodes/:personId', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const result = await adminDeleteNode(req.params['slug'] as string, req.user.userId, req.params['personId'] as string)
+  res.json(result)
+}))
+
+// Admin: delete a user — revoke all access + anonymise the account; node is kept.
+router.delete('/:slug/users/:userId', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await deleteUserAccount(req.params['slug'] as string, req.user.userId, req.params['userId'] as string)
   res.json(result)
 }))
 

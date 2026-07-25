@@ -983,6 +983,54 @@ export async function adminDeleteNode(slug: string, requesterId: string, personI
   return deletePerson(personId, requesterId, node.primary_family_id)
 }
 
+/** Admin: fully revoke a user's access ("delete user"). Un-claims every node the
+ *  account owns (nodes are KEPT as proxies), drops their community + family
+ *  memberships so they can no longer log in, and anonymises the account.
+ *
+ *  The `users` row can't be hard-deleted — it's referenced as the author/actor of
+ *  families, persons, relationships and audit history — so instead we strip all
+ *  PII + credentials + node link, leaving an inert stub. Not undoable. */
+export async function deleteUserAccount(slug: string, requesterId: string, targetUserId: string) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+  if (targetUserId === community.owner_id) throw forbidden('The community owner cannot be deleted')
+  if (targetUserId === requesterId) throw badRequest('You cannot delete your own account')
+
+  const { rows: [member] } = await query<{ user_id: string }>(
+    `SELECT user_id FROM community_members WHERE community_id = $1 AND user_id = $2`,
+    [community.id, targetUserId],
+  )
+  if (!member) throw notFound('That member was not found in this community')
+
+  await withOperation({ action: 'user.delete', actorId: requesterId, familyId: null }, async op => {
+    // 1. Un-claim every node this account owns — the nodes stay (as proxies).
+    await captureAndUpdate(
+      op, 'person',
+      { sql: 'claimed_by = $1', params: [targetUserId] },
+      { sql: `claimed_by = NULL, node_state = 'proxy', updated_at = NOW()`, params: [] },
+      { snapshotCols: 'id, claimed_by, node_state, full_name, primary_family_id' },
+    )
+    // 2. Drop memberships so they can no longer log in or be listed.
+    await op.tx.query(`DELETE FROM community_members WHERE user_id = $1`, [targetUserId])
+    await op.tx.query(`DELETE FROM family_members    WHERE user_id = $1`, [targetUserId])
+    // 3. Anonymise the account (email is NOT NULL UNIQUE, so tombstone it rather
+    //    than null it; kill the password so no credential can ever match).
+    await op.tx.query(
+      `UPDATE users
+       SET email         = 'deleted+' || id::text || '@deleted.invalid',
+           password_hash = 'DELETED',
+           display_name  = NULL,
+           phone         = NULL,
+           person_id     = NULL,
+           updated_at    = NOW()
+       WHERE id = $1`,
+      [targetUserId],
+    )
+  })
+  logger.info({ communityId: community.id, targetUserId, requesterId }, 'user account deleted (anonymised)')
+  return { success: true }
+}
+
 export async function getCommunityHealth(slug: string, requesterId: string) {
   const community = await getBySlug(slug)
   await assertAdmin(community.id, requesterId)
