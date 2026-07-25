@@ -196,6 +196,7 @@ router.get('/:slug/persons', requireAuth, asyncHandler(async (req: Request, res:
     q: str('q'), gender: str('gender'), gotra: str('gotra'),
     village: str('village'), city: str('city'),
     age_min: num('age_min'), age_max: num('age_max'),
+    marital: str('marital'), education: str('education'), occupation: str('occupation'),
   })
   res.json(results)
 }))

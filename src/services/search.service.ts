@@ -166,6 +166,10 @@ export type PersonFilters = {
   city?: string
   age_min?: number
   age_max?: number
+  /** 'married' | 'unmarried' — derived from active SPOUSE_OF relationships. */
+  marital?: string
+  education?: string
+  occupation?: string
 }
 
 // Age from birth_date when known, else birth_year. NULL when neither is set.
@@ -194,6 +198,18 @@ export async function filterCommunityPersons(communityId: string, f: PersonFilte
   if (f.city) add('(p.current_city ILIKE ? OR p.current_state ILIKE ? OR p.current_address ILIKE ?)', `%${f.city}%`)
   if (f.age_min !== undefined) add(`${AGE_EXPR} >= ?`, f.age_min)
   if (f.age_max !== undefined) add(`${AGE_EXPR} <= ?`, f.age_max)
+  if (f.education)  add('p.education ILIKE ?', `%${f.education}%`)
+  if (f.occupation) add('(p.occupation ILIKE ? OR p.occupation_detail ILIKE ?)', `%${f.occupation}%`)
+
+  // Marital status is not a column — a person is "married" iff they have an
+  // active (not soft-deleted, not separated) spouse link. This correlated
+  // sub-query carries no bound params, so it's pushed onto WHERE directly.
+  const SPOUSE_EXISTS =
+    `EXISTS (SELECT 1 FROM relationships r
+             WHERE  r.rel_type = 'SPOUSE_OF' AND r.deleted_at IS NULL AND r.is_active IS NOT FALSE
+               AND  (r.from_person_id = p.id OR r.to_person_id = p.id))`
+  if (f.marital === 'married')   where.push(SPOUSE_EXISTS)
+  if (f.marital === 'unmarried') where.push(`NOT ${SPOUSE_EXISTS}`)
 
   const { rows } = await query(
     `SELECT p.id, p.full_name, p.gender, p.gotra, p.birth_year,
