@@ -25,6 +25,28 @@ async function nextPersonCode(familyId: string, runner: QueryRunner = defaultRun
   return `${fam.name_prefix}-${seq}`
 }
 
+// Community "constant" fields → fixed column values stamped onto NEW nodes only
+// (Option B: existing nodes are never rewritten — the editor just displays the
+// constant). Only constants that map to a create-time column input are honored
+// here; others (e.g. religion) rely on their column default until added as an
+// explicit create param.
+async function communityConstantColumns(
+  communityId: string,
+  runner: QueryRunner,
+): Promise<Record<string, string>> {
+  const { rows: [row] } = await runner.query<{
+    settings: { fields?: Record<string, { type?: string; storage?: string; value?: string }> } | null
+  }>(`SELECT settings FROM communities WHERE id = $1`, [communityId])
+  const fields = row?.settings?.fields ?? {}
+  const out: Record<string, string> = {}
+  for (const [col, rule] of Object.entries(fields)) {
+    if (rule?.type === 'constant' && (rule.storage ?? 'column') === 'column' && rule.value) {
+      out[col] = rule.value
+    }
+  }
+  return out
+}
+
 export async function createPerson(
   input: CreatePersonInput,
   userId: string,
@@ -44,6 +66,11 @@ export async function createPerson(
         ? 'community'
         : (input.visibility ?? 'family')
 
+      // New-node constant autofill (Option B). Only fills a column the creator
+      // left blank; never overrides a value they supplied.
+      const constants = communityId ? await communityConstantColumns(communityId, op.tx) : {}
+      const effLastName = input.last_name?.trim() ? input.last_name : (constants.last_name ?? null)
+
       const personCode = await nextPersonCode(familyId, op.tx)
 
       const { rows: [created] } = await op.tx.query(
@@ -59,7 +86,7 @@ export async function createPerson(
            'proxy',$22,$23
          ) RETURNING *`,
         [
-          personCode, familyId, input.full_name, input.first_name ?? null, input.last_name ?? null,
+          personCode, familyId, input.full_name, input.first_name ?? null, effLastName,
           input.nickname ?? null, input.gender ?? null,
           input.birth_year ?? null, input.birth_place ?? null, input.death_year ?? null,
           input.is_alive ?? true, input.bio ?? null, input.occupation ?? null,

@@ -1,0 +1,11 @@
+{
+  "note": "6 gotras.",
+  "gotras": [
+    { "id": 1, "hi": "नाटाणी", "en": "Natani" },
+    { "id": 2, "hi": "खुटेटा", "en": "Khuteta" },
+    { "id": 3, "hi": "कुलवाल", "en": "Kulwal" },
+    { "id": 4, "hi": "कायथवाल", "en": "Kaythwal" },
+    { "id": 5, "hi": "मेहरवाल", "en": "Mehrwal" },
+    { "id": 6, "hi": "धोकरिया", "en": "Dhokriya" }
+  ]
+}

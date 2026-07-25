@@ -1,0 +1,599 @@
+{
+  "meta": {
+    "title": "परगनों के गांव अनुसार अनुक्रमणिका",
+    "source": "श्री खंडेलवाल वैश्य समाज, नयापुरा — ओलादखाना 2014",
+    "totalParganas": 15
+  },
+  "parganas": [
+    {
+      "id": 1,
+      "name": "आबूगोड",
+      "en": "Aabugod",
+      "villages": [
+        {
+          "no": 1,
+          "name": "डोडुआ",
+          "en": "Dodua"
+        },
+        {
+          "no": 2,
+          "name": "कृष्णगंज",
+          "en": "Krishnaganj"
+        },
+        {
+          "no": 3,
+          "name": "सिरोड़ी",
+          "en": "Sirodi"
+        },
+        {
+          "no": 4,
+          "name": "मालगांव",
+          "en": "Malgaon"
+        },
+        {
+          "no": 5,
+          "name": "छापोल",
+          "en": "Chhapol"
+        },
+        {
+          "no": 6,
+          "name": "डाक",
+          "en": "Dak"
+        },
+        {
+          "no": 7,
+          "name": "रेवदर",
+          "en": "Revdar"
+        },
+        {
+          "no": 8,
+          "name": "विवेकनवास",
+          "en": "Vivekanwas"
+        },
+        {
+          "no": 9,
+          "name": "कपासिया",
+          "en": "Kapasiya"
+        },
+        {
+          "no": 10,
+          "name": "भटाना",
+          "en": "Bhatana"
+        },
+        {
+          "no": 11,
+          "name": "मण्डार",
+          "en": "Mandar"
+        },
+        {
+          "no": 12,
+          "name": "मातासन",
+          "en": "Matasan"
+        },
+        {
+          "no": 13,
+          "name": "पांथावाडा",
+          "en": "Panthawada"
+        },
+        {
+          "no": 14,
+          "name": "सातसन",
+          "en": "Satasan"
+        },
+        {
+          "no": 15,
+          "name": "बापला",
+          "en": "Bapala"
+        },
+        {
+          "no": 16,
+          "name": "धानेरा",
+          "en": "Dhanera"
+        },
+        {
+          "no": 17,
+          "name": "सीया",
+          "en": "Siya"
+        },
+        {
+          "no": 18,
+          "name": "दुगाडोल",
+          "en": "Dugadol"
+        },
+        {
+          "no": 19,
+          "name": "डीसा",
+          "en": "Deesa"
+        },
+        {
+          "no": 20,
+          "name": "दियौदर",
+          "en": "Deodar"
+        },
+        {
+          "no": 21,
+          "name": "मीठावी",
+          "en": "Meethavi"
+        },
+        {
+          "no": 22,
+          "name": "मावसरी",
+          "en": "Mavasari"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "बड़गांव",
+      "en": "Badgav",
+      "villages": [
+        {
+          "no": 1,
+          "name": "बड़गांव",
+          "en": "Badgav"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "भीतरोट",
+      "en": "Bhitrot",
+      "villages": [
+        {
+          "no": 1,
+          "name": "ओर",
+          "en": "Aur"
+        },
+        {
+          "no": 2,
+          "name": "रोहिड़ा",
+          "en": "Rohida"
+        },
+        {
+          "no": 3,
+          "name": "मूंगथला",
+          "en": "Moongthala"
+        },
+        {
+          "no": 4,
+          "name": "नितोड़ा",
+          "en": "Nitol"
+        },
+        {
+          "no": 5,
+          "name": "सांतपुर",
+          "en": "Santpur"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "देवलारी",
+      "en": "Devlari",
+      "villages": [
+        {
+          "no": 1,
+          "name": "बा. बड़गांव",
+          "en": "Ba. Badgav"
+        },
+        {
+          "no": 2,
+          "name": "भजड़ी",
+          "en": "Bhajdi"
+        },
+        {
+          "no": 3,
+          "name": "भीनमाल",
+          "en": "Bhinmal"
+        },
+        {
+          "no": 4,
+          "name": "मालवाड़ा",
+          "en": "Malwada"
+        },
+        {
+          "no": 5,
+          "name": "पावली",
+          "en": "Pawli"
+        },
+        {
+          "no": 6,
+          "name": "जसवंतपुरा",
+          "en": "Jaswantpura"
+        },
+        {
+          "no": 7,
+          "name": "पूरण",
+          "en": "Puran"
+        },
+        {
+          "no": 8,
+          "name": "रानीवाड़ा",
+          "en": "Ranivada"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "name": "गोडवाड़",
+      "en": "Godvad",
+      "villages": [
+        {
+          "no": 1,
+          "name": "सेवाड़ी",
+          "en": "Sewadi"
+        },
+        {
+          "no": 2,
+          "name": "बेड़ा",
+          "en": "Beda"
+        },
+        {
+          "no": 3,
+          "name": "नाणा",
+          "en": "Nana"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "name": "जालोरी",
+      "en": "Jhalori",
+      "villages": [
+        {
+          "no": 1,
+          "name": "रानी",
+          "en": "Rani"
+        },
+        {
+          "no": 2,
+          "name": "सियाणा",
+          "en": "Siyana"
+        },
+        {
+          "no": 3,
+          "name": "कैलाशनगर",
+          "en": "Kailashnagar"
+        },
+        {
+          "no": 4,
+          "name": "रामा",
+          "en": "Rama"
+        },
+        {
+          "no": 5,
+          "name": "भाद्राजून",
+          "en": "Bhadrajun"
+        },
+        {
+          "no": 6,
+          "name": "गुडा बालोतान",
+          "en": "Guda Balotan"
+        },
+        {
+          "no": 7,
+          "name": "माण्डवला",
+          "en": "Mandwala"
+        },
+        {
+          "no": 8,
+          "name": "जालोर",
+          "en": "Jalore"
+        },
+        {
+          "no": 9,
+          "name": "आहोर",
+          "en": "Ahor"
+        },
+        {
+          "no": 10,
+          "name": "भीनमाल",
+          "en": "Bhinmal"
+        },
+        {
+          "no": 11,
+          "name": "कोमता",
+          "en": "Komta"
+        },
+        {
+          "no": 12,
+          "name": "लेटा",
+          "en": "Leta"
+        },
+        {
+          "no": 13,
+          "name": "देता",
+          "en": "Deta"
+        },
+        {
+          "no": 14,
+          "name": "उम्मेदाबाद",
+          "en": "Umedabad"
+        },
+        {
+          "no": 15,
+          "name": "मोकलसर",
+          "en": "Mokalsar"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "झोरा",
+      "en": "Jhora",
+      "villages": [
+        {
+          "no": 1,
+          "name": "उड",
+          "en": "Udd"
+        },
+        {
+          "no": 2,
+          "name": "कैलाशनगर",
+          "en": "Kailashnagar"
+        },
+        {
+          "no": 3,
+          "name": "जावल",
+          "en": "Javal"
+        },
+        {
+          "no": 4,
+          "name": "डोडुआ",
+          "en": "Dodua"
+        },
+        {
+          "no": 5,
+          "name": "पाडीव",
+          "en": "Padiv"
+        },
+        {
+          "no": 6,
+          "name": "बरलूट",
+          "en": "Barloot"
+        },
+        {
+          "no": 7,
+          "name": "मनादर",
+          "en": "Manadar"
+        },
+        {
+          "no": 8,
+          "name": "मंडवाड़ा",
+          "en": "Mandwada"
+        },
+        {
+          "no": 9,
+          "name": "मोहब्बतनगर",
+          "en": "Mohabbatnagar"
+        },
+        {
+          "no": 10,
+          "name": "वराडा",
+          "en": "Varada"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "name": "जोधपुर",
+      "en": "Jodhpur",
+      "villages": [
+        {
+          "no": 1,
+          "name": "जोधपुर",
+          "en": "Jodhpur"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "name": "खुणी गोडवाड़",
+      "en": "Khuni Godvad",
+      "villages": [
+        {
+          "no": 1,
+          "name": "सुमेरपुर",
+          "en": "Sumerpur"
+        },
+        {
+          "no": 2,
+          "name": "पालड़ीजोड",
+          "en": "Paldi Jod"
+        },
+        {
+          "no": 3,
+          "name": "जोयला",
+          "en": "Joyla"
+        },
+        {
+          "no": 4,
+          "name": "खेजड़िया",
+          "en": "Khejadiya"
+        },
+        {
+          "no": 5,
+          "name": "भारुन्दा",
+          "en": "Bharunda"
+        },
+        {
+          "no": 6,
+          "name": "तखतगढ़",
+          "en": "Takhatgarh"
+        },
+        {
+          "no": 7,
+          "name": "शिवगंज",
+          "en": "Shivganj"
+        },
+        {
+          "no": 8,
+          "name": "बांकली",
+          "en": "Bankli"
+        },
+        {
+          "no": 9,
+          "name": "नोवी",
+          "en": "Novi"
+        },
+        {
+          "no": 10,
+          "name": "पोमावा",
+          "en": "Pomawa"
+        },
+        {
+          "no": 11,
+          "name": "अहमदाबाद",
+          "en": "Ahmedabad"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "name": "मगरा",
+      "en": "Magara",
+      "villages": [
+        {
+          "no": 1,
+          "name": "कालन्द्री",
+          "en": "Kalandi"
+        },
+        {
+          "no": 2,
+          "name": "जेला",
+          "en": "Jela"
+        },
+        {
+          "no": 3,
+          "name": "मडिया",
+          "en": "Madiya"
+        },
+        {
+          "no": 4,
+          "name": "मेरमंडवाड़ा",
+          "en": "Mermandwada"
+        },
+        {
+          "no": 5,
+          "name": "सिलदर",
+          "en": "Sildar"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "name": "मालाणी",
+      "en": "Malani",
+      "villages": [
+        {
+          "no": 1,
+          "name": "मालाणी",
+          "en": "Malani"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "पोसालिया",
+      "en": "Posaliya",
+      "villages": [
+        {
+          "no": 1,
+          "name": "पोसालिया",
+          "en": "Posaliya"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "name": "रोई",
+      "en": "Roi",
+      "villages": [
+        {
+          "no": 1,
+          "name": "अजारी",
+          "en": "Ajari"
+        },
+        {
+          "no": 2,
+          "name": "नांदिया",
+          "en": "Nandiya"
+        },
+        {
+          "no": 3,
+          "name": "बेरवाड़ा",
+          "en": "Berwada"
+        },
+        {
+          "no": 4,
+          "name": "नया सानवाड़ा",
+          "en": "Naya Sanwada"
+        },
+        {
+          "no": 5,
+          "name": "कोटड़ा छावनी",
+          "en": "Kotda Chhavani"
+        },
+        {
+          "no": 6,
+          "name": "वासा",
+          "en": "Vasa"
+        },
+        {
+          "no": 7,
+          "name": "धनारी",
+          "en": "Dhanari"
+        },
+        {
+          "no": 8,
+          "name": "पिण्डवाड़ा",
+          "en": "Pindwara"
+        },
+        {
+          "no": 9,
+          "name": "झाड़ोली",
+          "en": "Jhadoli"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "name": "सिरोही",
+      "en": "Sirohi",
+      "villages": [
+        {
+          "no": 1,
+          "name": "सिरोही",
+          "en": "Sirohi"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "name": "सिवांची",
+      "en": "Siwanchi",
+      "villages": [
+        {
+          "no": 1,
+          "name": "जसोल",
+          "en": "Jasol"
+        },
+        {
+          "no": 2,
+          "name": "बालोतरा",
+          "en": "Balotara"
+        },
+        {
+          "no": 3,
+          "name": "सिवाणा",
+          "en": "Siwana"
+        },
+        {
+          "no": 4,
+          "name": "बायतु",
+          "en": "Baytu"
+        }
+      ]
+    }
+  ]
+}

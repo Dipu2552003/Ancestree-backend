@@ -15,7 +15,8 @@ import {
   type UpdateCommunityInput, type JoinCommunityInput,
 } from '../schemas/community.schema'
 import {
-  createCommunity, getCommunity, updateCommunity, deleteCommunity,
+  createCommunity, getCommunity, getFieldConfig, updateFieldConfig, replaceFieldOptions,
+  updateCommunity, deleteCommunity,
   communityLogin, communitySignup, sendSignupCode, peekSignupCode, joinCommunity, leaveCommunity,
   sendLoginOtp, loginWithOtp,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
@@ -178,6 +179,29 @@ router.get('/:slug/search', requireAuth, asyncHandler(async (req: Request, res: 
   const community = await getCommunity(req.params['slug'] as string)
   const results = await searchPersons(q, req.user.familyId, 'external', community.id)
   res.json(results)
+}))
+
+// ── Field config: enum option lists (gotra/village) + field rules ────────────
+// Public read — reference data used by the Parivar filters and node editor.
+router.get('/:slug/field-config', asyncHandler(async (req: Request, res: Response) => {
+  const result = await getFieldConfig(req.params['slug'] as string)
+  res.json(result)
+}))
+
+// Admin write — set which fields show and how (settings.fields).
+router.put('/:slug/field-config', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const fields = (req.body?.fields ?? {}) as Record<string, unknown>
+  const result = await updateFieldConfig(req.params['slug'] as string, req.user.userId, fields)
+  res.json(result)
+}))
+
+// Admin write — replace the dropdown values for one enum field.
+router.put('/:slug/field-options/:key', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const options = Array.isArray(req.body?.options) ? req.body.options : []
+  const result = await replaceFieldOptions(
+    req.params['slug'] as string, req.user.userId, req.params['key'] as string, options,
+  )
+  res.json(result)
 }))
 
 // ── Community-wide person directory with filters ("Apna Parivar") ────────────

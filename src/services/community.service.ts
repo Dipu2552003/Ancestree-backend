@@ -1,6 +1,6 @@
 import bcrypt from 'bcrypt'
 import crypto from 'crypto'
-import { query } from '../utils/db'
+import pool, { query } from '../utils/db'
 import { withOperation, auditCreate, captureAndUpdate, type Snapshot } from '../utils/audit'
 import { signToken } from '../utils/jwt'
 import { logger } from '../utils/logger'
@@ -32,6 +32,85 @@ async function getBySlug(slug: string): Promise<CommunityRow> {
   )
   if (!community) throw notFound('Community not found')
   return community
+}
+
+/** Field config for a community's data-entry / search forms:
+ *  - `fields`  — the rulebook from communities.settings.fields (which fields are
+ *    enum vs constant/auto-fill). `{}` until seeded.
+ *  - `options` — the option catalogs for enum fields, grouped by field_key, each
+ *    `{ value, label }` (value = canonical Hindi, label = English display).
+ *  Public: it's reference data (gotra / village lists), not member PII. */
+export async function getFieldConfig(slug: string) {
+  const community = await getBySlug(slug)
+  const { rows: [row] } = await query<{ settings: { fields?: Record<string, unknown> } | null }>(
+    `SELECT settings FROM communities WHERE id = $1`,
+    [community.id],
+  )
+  const { rows: opts } = await query<{ field_key: string; value: string; label: string | null }>(
+    `SELECT field_key, value, label
+     FROM   community_field_options
+     WHERE  community_id = $1 AND active
+     ORDER  BY field_key, sort_order, value`,
+    [community.id],
+  )
+  const options: Record<string, { value: string; label: string | null }[]> = {}
+  for (const o of opts) (options[o.field_key] ??= []).push({ value: o.value, label: o.label })
+  return { fields: row?.settings?.fields ?? {}, options }
+}
+
+/** Admin: replace the community's field rulebook (settings.fields). Returns the
+ *  refreshed field config. */
+export async function updateFieldConfig(
+  slug: string, userId: string, fields: Record<string, unknown>,
+) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, userId)
+  await query(
+    `UPDATE communities
+     SET settings = COALESCE(settings, '{}'::jsonb) || jsonb_build_object('fields', $2::jsonb),
+         updated_at = NOW()
+     WHERE id = $1`,
+    [community.id, JSON.stringify(fields)],
+  )
+  return getFieldConfig(slug)
+}
+
+/** Admin: replace ALL option rows for one enum field (gotra / village / …) in a
+ *  single transaction, so a failed write never leaves the list half-updated. */
+export async function replaceFieldOptions(
+  slug: string, userId: string, fieldKey: string,
+  options: { value: string; label?: string | null }[],
+) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, userId)
+
+  const clean = options
+    .map(o => ({ value: (o.value ?? '').trim(), label: o.label?.trim() || null }))
+    .filter(o => o.value)
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(
+      `DELETE FROM community_field_options WHERE community_id = $1 AND field_key = $2`,
+      [community.id, fieldKey],
+    )
+    let i = 0
+    for (const o of clean) {
+      await client.query(
+        `INSERT INTO community_field_options (community_id, field_key, value, label, sort_order)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [community.id, fieldKey, o.value, o.label, i++],
+      )
+    }
+    await client.query('COMMIT')
+  } catch (e) {
+    await client.query('ROLLBACK')
+    throw e
+  } finally {
+    client.release()
+  }
+  return getFieldConfig(slug)
 }
 
 async function assertAdmin(communityId: string, userId: string): Promise<void> {

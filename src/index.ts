@@ -8,6 +8,7 @@ import { testConnection } from './utils/db'
 import { logger } from './utils/logger'
 import { isAppError } from './utils/errors'
 import { runMigrations } from '../database/migrate'
+import { seedCommunityFields } from '../database/seedCommunityFields'
 import authRoutes          from './routes/auth.routes'
 import personsRoutes       from './routes/persons.routes'
 import relationshipsRoutes from './routes/relationships.routes'
@@ -119,6 +120,13 @@ async function start() {
     const dbUrl = process.env.DATABASE_URL
     if (!dbUrl) throw new Error('DATABASE_URL environment variable is not set')
     await runMigrations(dbUrl)
+    // Auto-seed community dropdown lists (gotra/village). Idempotent + never
+    // clobbers admin edits; a failure must not block the server from starting.
+    try {
+      await seedCommunityFields()
+    } catch (err) {
+      logger.warn({ err }, 'community field seed skipped')
+    }
     app.listen(PORT, () => {
       logger.info({ port: PORT }, 'server started')
     })
