@@ -1,6 +1,7 @@
 import bcrypt from 'bcrypt'
 import crypto from 'crypto'
 import pool, { query } from '../utils/db'
+import { deletePerson } from './persons.service'
 import { withOperation, auditCreate, captureAndUpdate, type Snapshot } from '../utils/audit'
 import { signToken } from '../utils/jwt'
 import { logger } from '../utils/logger'
@@ -932,6 +933,56 @@ export async function listCommunityFamilies(slug: string, requesterId: string) {
  * reports whether each constraint index is actually present, so admins know
  * whether the guarantee is live.
  */
+/** Resolve a node that belongs to `communityId`, or throw. */
+async function resolveCommunityNode(personId: string, communityId: string) {
+  const { rows: [node] } = await query<{ id: string; primary_family_id: string; claimed_by: string | null; community_id: string | null }>(
+    `SELECT p.id, p.primary_family_id, p.claimed_by, f.community_id
+     FROM   persons p JOIN families f ON f.id = p.primary_family_id
+     WHERE  p.id = $1 AND p.deleted_at IS NULL`,
+    [personId],
+  )
+  if (!node) throw notFound('Node not found')
+  if (node.community_id !== communityId) throw forbidden('That node is not in this community')
+  return node
+}
+
+/** Admin: strip a node's ownership without deleting it. Clears both sides of the
+ *  1:1 link (persons.claimed_by + the owning user's person_id) and drops the node
+ *  back to 'proxy'. Fixes accidental multi-ownership and unblocks deletion of a
+ *  node that "can't be deleted because it has an owner". */
+export async function revokeNodeOwnership(slug: string, requesterId: string, personId: string) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+  const node = await resolveCommunityNode(personId, community.id)
+  if (!node.claimed_by) return { success: true, revoked: false }
+
+  await withOperation(
+    { action: 'person.revoke_ownership', actorId: requesterId, familyId: node.primary_family_id },
+    async op => {
+      await captureAndUpdate(
+        op, 'person',
+        { sql: 'id = $1', params: [personId] },
+        { sql: `claimed_by = NULL, node_state = 'proxy', updated_at = NOW()`, params: [] },
+        { snapshotCols: 'id, claimed_by, node_state, full_name, primary_family_id' },
+      )
+      // Clear the reverse user -> node pointer so the account no longer maps here.
+      await op.tx.query(`UPDATE users SET person_id = NULL, updated_at = NOW() WHERE person_id = $1`, [personId])
+    },
+  )
+  return { success: true, revoked: true }
+}
+
+/** Admin: delete a node in this community (cross-family). The node must be
+ *  unclaimed first (revoke above); reuses the normal delete rules + the
+ *  empty-family auto-cleanup. */
+export async function adminDeleteNode(slug: string, requesterId: string, personId: string) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+  const node = await resolveCommunityNode(personId, community.id)
+  if (node.claimed_by) throw badRequest('Revoke this node’s ownership before deleting it')
+  return deletePerson(personId, requesterId, node.primary_family_id)
+}
+
 export async function getCommunityHealth(slug: string, requesterId: string) {
   const community = await getBySlug(slug)
   await assertAdmin(community.id, requesterId)

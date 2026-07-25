@@ -22,6 +22,7 @@ import {
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
   listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
   getMyCommunityRole, getCommunityStats, getCommunityHealth,
+  revokeNodeOwnership, adminDeleteNode,
 } from '../services/community.service'
 import { listCommunityMerges, forceMerge } from '../services/merge'
 import { searchPersons, filterCommunityPersons } from '../services/search.service'
@@ -285,6 +286,19 @@ router.get('/:slug/families', requireAuth, asyncHandler(async (req: Request, res
 // Admin data-health: 1:1 ownership issues + whether the constraint is live.
 router.get('/:slug/health', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const result = await getCommunityHealth(req.params['slug'] as string, req.user.userId)
+  res.json(result)
+}))
+
+// Admin: revoke a node's ownership (un-claim) without deleting it.
+router.post('/:slug/nodes/:personId/revoke-ownership', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await revokeNodeOwnership(req.params['slug'] as string, req.user.userId, req.params['personId'] as string)
+  res.json(result)
+}))
+
+// Admin: delete an (already un-claimed) node in this community; empty family is
+// auto-removed.
+router.delete('/:slug/nodes/:personId', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await adminDeleteNode(req.params['slug'] as string, req.user.userId, req.params['personId'] as string)
   res.json(result)
 }))
 

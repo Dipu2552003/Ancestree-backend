@@ -463,6 +463,23 @@ export async function deletePerson(id: string, userId: string, familyId: string)
     const softDeleted = !hasOwnFamily && person.node_state !== 'claimed'
     if (softDeleted) {
       await personsRepo.softDelete(id, op)
+
+      // If that was the family's last living node, retire the now-empty family
+      // too (soft-delete) so it doesn't linger as an orphan tree.
+      const { rows: [{ n }] } = await op.tx.query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM persons WHERE primary_family_id = $1 AND deleted_at IS NULL`,
+        [familyId],
+      )
+      if (n === 0) {
+        // Audited so undoing the person delete also restores the family.
+        await captureAndUpdate(
+          op, 'family',
+          { sql: 'id = $1 AND deleted_at IS NULL', params: [familyId] },
+          { sql: `deleted_at = NOW(), updated_at = NOW()`, params: [] },
+          { familyId, snapshotCols: 'id, deleted_at' },
+        )
+        logger.info({ familyId, personId: id }, 'family auto-deleted — no nodes remained')
+      }
     } else {
       logger.warn({ personId: id, userId, hasOwnFamily, nodeState: person.node_state }, 'person node kept — relationships removed only')
     }
