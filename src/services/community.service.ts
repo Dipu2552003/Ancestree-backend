@@ -845,3 +845,59 @@ export async function listCommunityFamilies(slug: string, requesterId: string) {
   )
   return { families: rows }
 }
+
+/**
+ * Data-health report for the admin dashboard. Surfaces the 1:1 ownership issues
+ * that block the uq_persons_claimed_by / uq_users_person_id constraints (migration
+ * 028 skips the index when the data is dirty, rather than crashing startup). Also
+ * reports whether each constraint index is actually present, so admins know
+ * whether the guarantee is live.
+ */
+export async function getCommunityHealth(slug: string, requesterId: string) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+
+  // Accounts that own more than one active node in this community.
+  const { rows: duplicateOwners } = await query(
+    `SELECT p.claimed_by AS user_id, u.display_name, u.email,
+            COUNT(*)::int AS node_count,
+            array_agg(p.full_name ORDER BY p.created_at) AS node_names,
+            array_agg(p.id::text ORDER BY p.created_at) AS node_ids
+     FROM   persons p
+     JOIN   users u ON u.id = p.claimed_by
+     WHERE  p.community_id = $1 AND p.claimed_by IS NOT NULL AND p.deleted_at IS NULL
+     GROUP  BY p.claimed_by, u.display_name, u.email
+     HAVING COUNT(*) > 1
+     ORDER  BY COUNT(*) DESC`,
+    [community.id],
+  )
+
+  // Nodes in this community pointed at by more than one account.
+  const { rows: duplicateLinks } = await query(
+    `SELECT u.person_id, p.full_name,
+            COUNT(*)::int AS user_count,
+            array_agg(u.email) AS emails
+     FROM   users u
+     JOIN   persons p ON p.id = u.person_id
+     WHERE  p.community_id = $1
+     GROUP  BY u.person_id, p.full_name
+     HAVING COUNT(*) > 1
+     ORDER  BY COUNT(*) DESC`,
+    [community.id],
+  )
+
+  // Are the uniqueness indexes actually in place?
+  const { rows: [idx] } = await query<{ claimed_by_idx: boolean; person_id_idx: boolean }>(
+    `SELECT
+       EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'uq_persons_claimed_by') AS claimed_by_idx,
+       EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'uq_users_person_id')    AS person_id_idx`,
+  )
+
+  const ownershipConstraintActive = !!idx?.claimed_by_idx && !!idx?.person_id_idx
+
+  return {
+    ownership_constraint_active: ownershipConstraintActive,
+    duplicate_owners: duplicateOwners,
+    duplicate_person_links: duplicateLinks,
+  }
+}

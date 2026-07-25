@@ -182,7 +182,7 @@ async function revertUpdate(op: OperationContext, row: AuditRow): Promise<void> 
 // get an Undo control and form the two undo stacks. Undo operations themselves
 // are excluded — the original entry shows an "Undone" badge instead, so an undo
 // can never be re-undone from the UI (one-shot revert).
-const UNDOABLE_ACTIONS = ['person.create', 'merge.accept']
+const UNDOABLE_ACTIONS = ['person.create', 'merge.accept', 'person.bloodline_update', 'person.bulk_update']
 
 // Everything the history panel *lists*. person.update (proxy detail edits) is
 // surfaced in the "Detail edits" tab so we track who edited whom, but it is NOT
@@ -194,13 +194,21 @@ const LISTED_ACTIONS = [...UNDOABLE_ACTIONS, 'person.update']
 // add/deletes in the other — so a merge can be undone without first unwinding
 // people added after it (they touch different entities). Order is still strict
 // *within* each track.
-type UndoTrack = 'merge' | 'structure'
+// Admin bulk edits (bloodline + manual multi-select) share their OWN track so
+// they undo independently of structural add/deletes and merges — an admin can
+// revert a bulk change in a single step without first unwinding anything added
+// afterwards.
+type UndoTrack = 'merge' | 'structure' | 'bulk'
+const BULK_ACTIONS = ['person.bloodline_update', 'person.bulk_update']
 function trackOf(action: string): UndoTrack {
-  return action.startsWith('merge') ? 'merge' : 'structure'
+  if (action.startsWith('merge'))    return 'merge'
+  if (BULK_ACTIONS.includes(action)) return 'bulk'
+  return 'structure'
 }
 const TRACK_ACTIONS: Record<UndoTrack, string[]> = {
   merge:     UNDOABLE_ACTIONS.filter(a => trackOf(a) === 'merge'),
   structure: UNDOABLE_ACTIONS.filter(a => trackOf(a) === 'structure'),
+  bulk:      UNDOABLE_ACTIONS.filter(a => trackOf(a) === 'bulk'),
 }
 
 /** A family admin (the family's owner/manager) may undo any member's action. */
@@ -364,6 +372,24 @@ function summarize(action: string, entries: HistoryEntrySlim[]): string {
     case 'person.invite':       return name ? `Invited ${name}` : 'Sent an invite'
     case 'person.claim':        return name ? `${name} was claimed by its owner` : 'A node was claimed'
     case 'person.reparent':     return 'Re-assigned children to a different mother'
+    case 'person.bloodline_update':
+    case 'person.bulk_update': {
+      const people = entries.filter(e => e.entity_type === 'person')
+      const changed = new Set<string>()
+      for (const e of people) {
+        if (e.before_state && e.after_state) {
+          if (e.before_state.gotra !== e.after_state.gotra) changed.add('gotra')
+          if (e.before_state.native_village !== e.after_state.native_village) changed.add('village')
+          if (e.before_state.current_city !== e.after_state.current_city
+            || e.before_state.current_district !== e.after_state.current_district
+            || e.before_state.current_state !== e.after_state.current_state) changed.add('location')
+        }
+      }
+      const fieldLabel = changed.size ? Array.from(changed).join(' & ') : 'details'
+      const n = people.length
+      const prefix = action === 'person.bloodline_update' ? 'Bloodline' : 'Bulk edit'
+      return `${prefix} ${fieldLabel} change · ${n} ${n === 1 ? 'person' : 'people'}`
+    }
     case 'relationship.create': return `Added a ${relLabel} link`
     case 'relationship.update': return `Edited a ${relLabel} link`
     case 'relationship.delete': return `Removed a ${relLabel} link`
@@ -468,6 +494,7 @@ export async function getFamilyHistory(familyId: string, userId: string, limit =
   const topIdByTrack: Record<UndoTrack, string | null> = {
     merge:     ops.find(o => o.reverted_by === null && UNDOABLE_ACTIONS.includes(o.action) && trackOf(o.action) === 'merge')?.operation_id ?? null,
     structure: ops.find(o => o.reverted_by === null && UNDOABLE_ACTIONS.includes(o.action) && trackOf(o.action) === 'structure')?.operation_id ?? null,
+    bulk:      ops.find(o => o.reverted_by === null && UNDOABLE_ACTIONS.includes(o.action) && trackOf(o.action) === 'bulk')?.operation_id ?? null,
   }
 
   // For undo operations, prefer the marker row's action ('undo:<target>') for

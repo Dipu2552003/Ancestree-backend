@@ -9,8 +9,24 @@ import {
 } from '../schemas/person.schema'
 import {
   createPerson, getPersonById, updatePerson, deletePerson, generateInviteToken,
+  bulkUpdatePersons,
 } from '../services/persons.service'
 import { reparentChildren, reorderChildren } from '../services/relationships.service'
+
+// Admin bulk edit over a set of people (bloodline BFS or a manual multi-select).
+// 'bloodline' may set gotra/village; 'selection' may also set current location.
+// At least one field must be present — re-checked in the service per scope.
+const bulkUpdateSchema = z.object({
+  person_ids:       z.array(z.string().uuid()).min(1).max(2000),
+  scope:            z.enum(['bloodline', 'selection']),
+  gotra:            z.string().max(100).optional(),
+  native_village:   z.string().max(120).optional(),
+  current_city:     z.string().max(120).optional(),
+  current_district: z.string().max(120).optional(),
+  current_state:    z.string().max(120).optional(),
+  current_country:  z.string().max(120).optional(),
+})
+type BulkUpdateInput = z.infer<typeof bulkUpdateSchema>
 
 const reparentSchema = z.object({
   changes: z.array(z.object({
@@ -32,6 +48,14 @@ router.post('/', validate(createPersonSchema), asyncHandler(async (req: Request,
   const input = req.validated as CreatePersonInput
   const person = await createPerson(input, req.user.userId, req.user.familyId)
   res.status(201).json(person)
+}))
+
+// Admin bulk edit (bloodline or manual multi-select) — registered before the
+// /:id routes so the literal path can never be shadowed by an :id match.
+router.post('/bulk-update', validate(bulkUpdateSchema), asyncHandler(async (req: Request, res: Response) => {
+  const { person_ids, scope, ...changes } = req.validated as BulkUpdateInput
+  const result = await bulkUpdatePersons(person_ids, scope, changes, req.user.userId)
+  res.json(result)
 }))
 
 router.get('/:id', asyncHandler(async (req: Request, res: Response) => {

@@ -243,6 +243,102 @@ export async function generateInviteToken(id: string, userId: string, familyId: 
   return { invite_token: token }
 }
 
+// ── Bloodline bulk edit (admin) ──────────────────────────────────────────────
+
+/** True if the user is a family admin of the given family. */
+async function isFamilyAdmin(familyId: string, userId: string): Promise<boolean> {
+  const { rows } = await query<{ role: string }>(
+    `SELECT role FROM family_members WHERE family_id = $1 AND user_id = $2`,
+    [familyId, userId],
+  )
+  return rows[0]?.role === 'admin'
+}
+
+/** True if the user is the owner or an admin of the given community. */
+async function isCommunityAdmin(communityId: string, userId: string): Promise<boolean> {
+  const { rows } = await query<{ role: string }>(
+    `SELECT role FROM community_members WHERE community_id = $1 AND user_id = $2`,
+    [communityId, userId],
+  )
+  return rows[0]?.role === 'owner' || rows[0]?.role === 'admin'
+}
+
+// Two admin bulk-edit flows share this path:
+//   • 'bloodline' — a paternal line resolved automatically (gotra/village are
+//     patrilineal, so a whole line shares them).
+//   • 'selection' — an ad-hoc set of people the admin hand-picked; may also set
+//     current location, which is per-person and so has no place in a bloodline.
+export type BulkScope = 'bloodline' | 'selection'
+
+// Columns each scope is allowed to touch. Everything not listed is ignored even
+// if sent, so the endpoint can never become a general person-editor.
+const BULK_FIELDS: Record<BulkScope, readonly string[]> = {
+  bloodline: ['gotra', 'native_village'],
+  selection: ['gotra', 'native_village', 'current_city', 'current_district', 'current_state', 'current_country'],
+}
+
+/**
+ * Bulk-set a small set of fields on a set of person ids the caller resolved on
+ * the graph (bloodline BFS or a manual multi-select — see lib/graph/bloodline
+ * and the selection UI on the frontend). Recorded as ONE operation so a single
+ * undo reverts the entire change.
+ *
+ * Scope + auth: every target must live in the same family; the caller must be a
+ * family admin of that family, or an owner/admin of its community.
+ */
+export async function bulkUpdatePersons(
+  personIds: string[],
+  scope: BulkScope,
+  changes: Record<string, string | undefined>,
+  userId: string,
+) {
+  const allowedCols = BULK_FIELDS[scope]
+  const setEntries = allowedCols
+    .filter(k => typeof changes[k] === 'string' && changes[k]!.trim().length > 0)
+    .map(k => [k, changes[k]!.trim()] as const)
+  if (setEntries.length === 0) throw badRequest('Choose at least one field to apply')
+
+  // Resolve the targets — must exist, not be deleted, and share one family.
+  const { rows: targets } = await query<{ id: string; primary_family_id: string; community_id: string | null }>(
+    `SELECT id, primary_family_id, community_id
+     FROM   persons
+     WHERE  id = ANY($1::uuid[]) AND deleted_at IS NULL`,
+    [personIds],
+  )
+  if (targets.length === 0) throw notFound('No matching people to update')
+  const familyIds = new Set(targets.map(t => t.primary_family_id))
+  if (familyIds.size > 1) throw badRequest('A bulk selection must belong to a single family')
+  const familyId    = targets[0].primary_family_id
+  const communityId = targets[0].community_id
+
+  // Auth: family admin OR community owner/admin.
+  const allowed =
+    (await isFamilyAdmin(familyId, userId)) ||
+    (communityId ? await isCommunityAdmin(communityId, userId) : false)
+  if (!allowed) throw forbidden('Only a family or community admin can bulk-edit people')
+
+  const ids = targets.map(t => t.id)
+  const setClauses = setEntries.map(([k], i) => `${k} = $${i + 1}`).join(', ')
+  const values     = setEntries.map(([, v]) => v)
+
+  // Distinct history action per scope so the summary + undo track read right.
+  const action = scope === 'bloodline' ? 'person.bloodline_update' : 'person.bulk_update'
+
+  const { after } = await withOperation(
+    { action, actorId: userId, familyId },
+    op => captureAndUpdate(op, 'person',
+      { sql: 'id = ANY($1::uuid[]) AND deleted_at IS NULL', params: [ids] },
+      { sql: `${setClauses}, updated_at = NOW()`, params: values },
+    ),
+  )
+
+  logger.info(
+    { userId, familyId, scope, count: after.length, fields: setEntries.map(([k]) => k) },
+    'bulk person update',
+  )
+  return { updated: after.length, family_id: familyId, fields: setEntries.map(([k]) => k) }
+}
+
 /** Connected-component count over the given person ids and edges. */
 function countComponents(ids: Set<string>, edges: { from_person_id: string; to_person_id: string }[]): number {
   const adj = new Map<string, string[]>()

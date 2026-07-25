@@ -20,7 +20,7 @@ import {
   sendLoginOtp, loginWithOtp,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
   listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
-  getMyCommunityRole, getCommunityStats,
+  getMyCommunityRole, getCommunityStats, getCommunityHealth,
 } from '../services/community.service'
 import { listCommunityMerges, forceMerge } from '../services/merge'
 import { searchPersons, filterCommunityPersons } from '../services/search.service'
@@ -254,6 +254,12 @@ router.post('/:slug/join-code/reset', requireAuth, asyncHandler(async (req: Requ
 
 router.get('/:slug/families', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const result = await listCommunityFamilies(req.params['slug'] as string, req.user.userId)
+  res.json(result)
+}))
+
+// Admin data-health: 1:1 ownership issues + whether the constraint is live.
+router.get('/:slug/health', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await getCommunityHealth(req.params['slug'] as string, req.user.userId)
   res.json(result)
 }))
 
