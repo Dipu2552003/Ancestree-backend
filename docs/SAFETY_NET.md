@@ -210,9 +210,13 @@ flowchart TD
   fetches, and searches skip it, but undo can clear that timestamp.
 - **The family NAME is derived data**: after a merge (and after structural
   undos), `recomputeFamilyHead` walks `PARENT_OF` edges to the topmost
-  ancestor and renames the family "*FirstName* Family". That rename is logged
-  as its own tiny operation (`family.update_head`, actor = System) — and only
-  when the name actually changes, so history stays clean.
+  ancestor (the **cluster head**) and renames the family "*FirstName* Family".
+  That rename is logged as its own tiny operation (`family.update_head`,
+  actor = System) — and only when the name actually changes, so history stays clean.
+- **Per-person family head is also derived**: `recomputeFamilyHeads` re-stamps
+  each person's `family_head_id` (the topmost ancestor of their own patriline —
+  see core-concepts §3). It is *not* audited (recomputed on undo instead), so it
+  never appears in the operation log. Cluster head ≠ family head: see core-concepts.
 
 ### Undoing a merge
 

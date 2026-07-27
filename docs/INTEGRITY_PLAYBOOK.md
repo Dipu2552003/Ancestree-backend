@@ -164,7 +164,7 @@ Quick reference for "what should happen." 🛑 block, ⚠️ warn+confirm, ✅ a
 | Root with many unlinked children | 🛑 → Resolve helper | would split into many trees |
 | Bridge (parents + children) | 🛑 → Resolve helper | re-parent / promote / cascade-delete |
 | Claimed account / Self | 🛑 | only relationships can be detached |
-| Family head (defines name) | ⚠️ | family is recomputed + renamed |
+| Cluster head (defines family name) | ⚠️ | family is recomputed + renamed; family heads re-stamped |
 
 ### Removing a relationship
 | Situation | Response | Notes |
@@ -178,7 +178,7 @@ Quick reference for "what should happen." 🛑 block, ⚠️ warn+confirm, ✅ a
 | Situation | Response | Why it matters later |
 |---|---|---|
 | Add child under a leaf | ✅ | that leaf is no longer leaf-deletable (your point) |
-| Add parent above a root | ⚠️ | family head + name may change |
+| Add parent above a root | ⚠️ | cluster head + name may change; that lineage's family head moves up |
 | Add 2nd active spouse | 🛑→ second-spouse flow | avoids ambiguous "current spouse" |
 
 ### Merge & unmerge

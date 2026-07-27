@@ -59,6 +59,7 @@ interface DBPerson {
   occupation: string | null; occupation_detail: string | null; education: string | null; bio: string | null
   photo_url: string | null; photo_thumbnail_url: string | null; node_state: string; claimed_by: string | null
   created_by: string; visibility: string; person_code: string; primary_family_id: string
+  family_head_id: string | null
 }
 
 interface DBRelationship {
@@ -226,7 +227,7 @@ export async function fetchFamilyGraph(
       // merged canonical nodes (whose primary_family_id belongs to another
       // family) visible in the graph after a merge.
       `SELECT DISTINCT
-              p.id, p.person_code, p.primary_family_id, p.node_state, p.claimed_by, p.created_by, p.visibility,
+              p.id, p.person_code, p.primary_family_id, p.family_head_id, p.node_state, p.claimed_by, p.created_by, p.visibility,
               p.full_name, p.first_name, p.middle_name, p.last_name, p.nickname,
               p.gender, p.gotra, p.religion,
               p.birth_date, p.birth_year, p.birth_place,
@@ -306,6 +307,7 @@ export async function fetchFamilyGraph(
     data: {
       personId:           p.id,
       personCode:         p.person_code,
+      familyHeadId:       p.family_head_id,
       fullName:           p.full_name,
       birthYear:          p.birth_year,
       deathYear:          p.death_year,
@@ -372,6 +374,24 @@ export async function fetchFamilyGraph(
     },
   }))
 
+  // ── Family head (lineage) for the current perspective ───────────────────────
+  // Resolved from the persisted persons.family_head_id, so the badge no longer
+  // recomputes on every visit. The head is looked up in the full family person
+  // set (not the depth-clamped view), so it's available even when the head sits
+  // beyond the visible generations. Falls back to null → frontend uses
+  // computeFamilyName() until the backfill/recompute has populated the column.
+  const selfPerson = persons.find(p => p.id === selfId)
+  const headPerson = selfPerson?.family_head_id
+    ? persons.find(p => p.id === selfPerson.family_head_id)
+    : undefined
+  const headFirst = (headPerson?.first_name ?? headPerson?.full_name ?? '').trim().split(/\s+/)[0] ?? ''
+  const familyHeadName = headFirst ? `${headFirst} Family` : null
+  const lineageCount = new Set(
+    persons
+      .filter(p => p.primary_family_id === familyId && p.family_head_id)
+      .map(p => p.family_head_id),
+  ).size
+
   logger.debug({ familyId, userId, nodes: nodes.length, edges: edges.length, ancestorDepth: ancestorClamp, descendantDepth: descendantClamp, hasMoreAncestors, hasMoreDescendants }, 'graph fetched')
   return {
     nodes,
@@ -383,6 +403,9 @@ export async function fetchFamilyGraph(
       effectiveDescendantDepth: descendantClamp,
       hasMoreAncestors,
       hasMoreDescendants,
+      familyHeadId:            selfPerson?.family_head_id ?? null,
+      familyHeadName,
+      lineageCount,
     },
   }
 }

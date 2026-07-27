@@ -23,6 +23,7 @@ import {
   listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
   getMyCommunityRole, getCommunityStats, getCommunityHealth,
   revokeNodeOwnership, adminDeleteNode, deleteUserAccount,
+  listCommunityHomes, searchCommunityHomes, createHome, updateHome, deleteHome, addHomeMembers, removeHomeMember,
 } from '../services/community.service'
 import { listCommunityMerges, forceMerge } from '../services/merge'
 import { searchPersons, filterCommunityPersons } from '../services/search.service'
@@ -202,6 +203,57 @@ router.put('/:slug/field-options/:key', requireAuth, asyncHandler(async (req: Re
   const result = await replaceFieldOptions(
     req.params['slug'] as string, req.user.userId, req.params['key'] as string, options,
   )
+  res.json(result)
+}))
+
+// ── Homes (admin only) — who lives together, independent of lineage ──────────
+
+router.get('/:slug/homes', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await listCommunityHomes(req.params['slug'] as string, req.user.userId)
+  res.json(result)
+}))
+
+router.post('/:slug/homes', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const b = req.body ?? {}
+  const result = await createHome(req.params['slug'] as string, req.user.userId, {
+    name: b.name, city: b.city, state: b.state, country: b.country,
+    person_ids: Array.isArray(b.person_ids) ? b.person_ids : [],
+  })
+  res.status(201).json(result)
+}))
+
+router.patch('/:slug/homes/:id', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const b = req.body ?? {}
+  const result = await updateHome(req.params['slug'] as string, req.user.userId, req.params['id'] as string, {
+    name: b.name, city: b.city, state: b.state, country: b.country,
+  })
+  res.json(result)
+}))
+
+router.delete('/:slug/homes/:id', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await deleteHome(req.params['slug'] as string, req.user.userId, req.params['id'] as string)
+  res.json(result)
+}))
+
+router.post('/:slug/homes/:id/members', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const ids = Array.isArray(req.body?.person_ids) ? req.body.person_ids : []
+  const result = await addHomeMembers(req.params['slug'] as string, req.user.userId, req.params['id'] as string, ids)
+  res.json(result)
+}))
+
+router.delete('/:slug/homes/:id/members/:personId', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await removeHomeMember(
+    req.params['slug'] as string, req.user.userId, req.params['id'] as string, req.params['personId'] as string,
+  )
+  res.json(result)
+}))
+
+// ── Home directory (community members) — search homes by name or location ────
+
+router.get('/:slug/homes-directory', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const community = await getCommunity(req.params['slug'] as string)
+  const q = typeof req.query.q === 'string' && req.query.q.trim() ? req.query.q.trim() : undefined
+  const result = await searchCommunityHomes(community.id, { q })
   res.json(result)
 }))
 

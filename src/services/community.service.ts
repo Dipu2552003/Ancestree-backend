@@ -902,7 +902,8 @@ export async function listCommunityFamilies(slug: string, requesterId: string) {
             COUNT(DISTINCT p.id)::int       AS person_count,
             COUNT(DISTINCT fm.user_id)::int AS member_count,
             rep.person_id AS view_person_id,
-            rep.full_name AS view_person_name
+            rep.full_name AS view_person_name,
+            COALESCE(heads.list, '[]'::jsonb) AS heads
      FROM   families f
      LEFT   JOIN persons p         ON p.primary_family_id = f.id AND p.deleted_at IS NULL
      LEFT   JOIN family_members fm ON fm.family_id = f.id
@@ -918,12 +919,271 @@ export async function listCommunityFamilies(slug: string, requesterId: string) {
                  rp.person_code
        LIMIT 1
      ) rep ON true
+     -- The distinct lineages (family heads) inside this cluster — each opens to
+     -- that head's perspective view. Ordered largest lineage first.
+     LEFT   JOIN LATERAL (
+       SELECT jsonb_agg(jsonb_build_object(
+                'person_id', h.family_head_id,
+                'name',      hp.full_name,
+                'count',     h.cnt
+              ) ORDER BY h.cnt DESC, hp.full_name) AS list
+       FROM (
+         SELECT family_head_id, COUNT(*)::int AS cnt
+         FROM   persons
+         WHERE  primary_family_id = f.id AND deleted_at IS NULL AND family_head_id IS NOT NULL
+         GROUP  BY family_head_id
+       ) h
+       JOIN persons hp ON hp.id = h.family_head_id
+     ) heads ON true
      WHERE  f.community_id = $1 AND f.deleted_at IS NULL
-     GROUP  BY f.id, rep.person_id, rep.full_name
+     GROUP  BY f.id, rep.person_id, rep.full_name, heads.list
      ORDER  BY f.created_at DESC`,
     [community.id],
   )
   return { families: rows }
+}
+
+// ── Homes ─────────────────────────────────────────────────────────────────────
+//
+// A home is a set of people who physically live together, independent of lineage.
+// Community-scoped and admin-managed. The home head (whose perspective opens on
+// click) is auto-picked with the same ranking as the family/cluster head:
+// male → earliest birth_year → lowest person_code.
+
+// One home per person for now. Enforced by blocking (below), not by a DB unique
+// constraint — the join table stays many-to-many so this can be relaxed later
+// without a migration.
+
+type Runner = <T extends import('pg').QueryResultRow = import('pg').QueryResultRow>(
+  text: string, params?: unknown[],
+) => Promise<import('pg').QueryResult<T>>
+
+/**
+ * Block the operation (naming the offenders) if any of these people already
+ * belong to an active home — a person can be in only one home for now.
+ */
+async function assertNoneAlreadyInHome(personIds: string[], run: Runner = query): Promise<void> {
+  const { rows } = await run<{ full_name: string }>(
+    `SELECT DISTINCT p.full_name
+     FROM   home_members hm JOIN persons p ON p.id = hm.person_id
+     WHERE  hm.person_id = ANY($1::uuid[]) AND hm.deleted_at IS NULL`,
+    [personIds],
+  )
+  if (rows.length > 0) {
+    const names = rows.map(r => r.full_name).join(', ')
+    throw badRequest(
+      `${names} ${rows.length === 1 ? 'is' : 'are'} already in a home. Remove ${rows.length === 1 ? 'them' : 'them'} from that home first.`,
+    )
+  }
+}
+
+/** Re-pick a home's head from its current active members. */
+async function recomputeHomeHead(homeId: string, run: Runner = query): Promise<void> {
+  await run(
+    `UPDATE homes SET head_person_id = (
+       SELECT p.id
+       FROM   home_members hm
+       JOIN   persons p ON p.id = hm.person_id AND p.deleted_at IS NULL
+       WHERE  hm.home_id = $1 AND hm.deleted_at IS NULL
+       ORDER  BY CASE WHEN p.gender = 'male' THEN 0 ELSE 1 END,
+                 p.birth_year ASC NULLS LAST, p.person_code ASC
+       LIMIT 1
+     ), updated_at = NOW()
+     WHERE id = $1`,
+    [homeId],
+  )
+}
+
+/** Assert every id is a live person whose family belongs to this community. */
+async function assertPersonsInCommunity(personIds: string[], communityId: string): Promise<void> {
+  if (personIds.length === 0) throw badRequest('Select at least one person')
+  const { rows } = await query<{ id: string }>(
+    `SELECT p.id
+     FROM   persons p JOIN families f ON f.id = p.primary_family_id
+     WHERE  p.id = ANY($1::uuid[]) AND f.community_id = $2 AND p.deleted_at IS NULL`,
+    [personIds, communityId],
+  )
+  if (rows.length !== new Set(personIds).size) {
+    throw badRequest('One or more selected people are not in this community')
+  }
+}
+
+export async function listCommunityHomes(slug: string, requesterId: string) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+
+  const { rows } = await query(
+    `SELECT h.id, h.name, h.city, h.state, h.country, h.created_at,
+            h.head_person_id,
+            hp.full_name AS head_name,
+            COALESCE(m.list, '[]'::jsonb) AS members
+     FROM   homes h
+     LEFT   JOIN persons hp ON hp.id = h.head_person_id AND hp.deleted_at IS NULL
+     LEFT   JOIN LATERAL (
+       SELECT jsonb_agg(jsonb_build_object(
+                'person_id', p.id, 'name', p.full_name, 'photo_url', p.photo_url
+              ) ORDER BY p.full_name) AS list
+       FROM   home_members hm
+       JOIN   persons p ON p.id = hm.person_id AND p.deleted_at IS NULL
+       WHERE  hm.home_id = h.id AND hm.deleted_at IS NULL
+     ) m ON true
+     WHERE  h.community_id = $1 AND h.deleted_at IS NULL
+     ORDER  BY h.created_at DESC`,
+    [community.id],
+  )
+  return { homes: rows }
+}
+
+/**
+ * Public (community-member) home directory for the community site. Lists homes
+ * with their members + head, largest first. A single `q` matches the home name,
+ * the home head's name, or the city/state — so one search box covers "by name"
+ * and "by location". No `q` → all homes (browse). Not admin-gated.
+ */
+export async function searchCommunityHomes(communityId: string, f: { q?: string }) {
+  const where = ['h.community_id = $1', 'h.deleted_at IS NULL']
+  const params: unknown[] = [communityId]
+  if (f.q) {
+    params.push(`%${f.q}%`)
+    const i = params.length
+    where.push(`(h.name ILIKE $${i} OR hp.full_name ILIKE $${i} OR h.city ILIKE $${i} OR h.state ILIKE $${i})`)
+  }
+
+  const { rows } = await query(
+    `SELECT h.id, h.name, h.city, h.state,
+            h.head_person_id,
+            hp.full_name AS head_name,
+            COALESCE(m.list, '[]'::jsonb) AS members,
+            COALESCE(m.cnt, 0)            AS member_count
+     FROM   homes h
+     LEFT   JOIN persons hp ON hp.id = h.head_person_id AND hp.deleted_at IS NULL
+     LEFT   JOIN LATERAL (
+       SELECT jsonb_agg(jsonb_build_object(
+                'person_id', p.id, 'name', p.full_name, 'photo_url', p.photo_url
+              ) ORDER BY p.full_name) AS list,
+              COUNT(*)::int AS cnt
+       FROM   home_members hm
+       JOIN   persons p ON p.id = hm.person_id AND p.deleted_at IS NULL
+       WHERE  hm.home_id = h.id AND hm.deleted_at IS NULL
+     ) m ON true
+     WHERE  ${where.join(' AND ')}
+     ORDER  BY member_count DESC, h.created_at DESC
+     LIMIT  200`,
+    params,
+  )
+  return { homes: rows }
+}
+
+export async function createHome(
+  slug: string, requesterId: string,
+  input: { name?: string | null; city?: string | null; state?: string | null; country?: string | null; person_ids: string[] },
+) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+
+  const personIds = [...new Set(input.person_ids ?? [])]
+  await assertPersonsInCommunity(personIds, community.id)
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const run = client.query.bind(client) as Runner
+
+    const { rows: [home] } = await run<{ id: string }>(
+      `INSERT INTO homes (community_id, name, city, state, country, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [community.id, input.name?.trim() || null, input.city?.trim() || null,
+       input.state?.trim() || null, input.country?.trim() || null, requesterId],
+    )
+
+    // One home per person → refuse if anyone is already housed (names them).
+    await assertNoneAlreadyInHome(personIds, run)
+    for (const pid of personIds) {
+      await run(`INSERT INTO home_members (home_id, person_id) VALUES ($1, $2)`, [home.id, pid])
+    }
+    await recomputeHomeHead(home.id, run)
+
+    await client.query('COMMIT')
+    logger.info({ homeId: home.id, members: personIds.length, communityId: community.id }, 'home created')
+    return { id: home.id }
+  } catch (e) {
+    await client.query('ROLLBACK')
+    throw e
+  } finally {
+    client.release()
+  }
+}
+
+/** Resolve a home in this community, or throw. */
+async function getHomeInCommunity(homeId: string, communityId: string): Promise<{ id: string }> {
+  const { rows: [home] } = await query<{ id: string }>(
+    `SELECT id FROM homes WHERE id = $1 AND community_id = $2 AND deleted_at IS NULL`,
+    [homeId, communityId],
+  )
+  if (!home) throw notFound('Home not found')
+  return home
+}
+
+export async function updateHome(
+  slug: string, requesterId: string, homeId: string,
+  input: { name?: string | null; city?: string | null; state?: string | null; country?: string | null },
+) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+  await getHomeInCommunity(homeId, community.id)
+
+  await query(
+    `UPDATE homes SET
+       name    = COALESCE($2, name),
+       city    = COALESCE($3, city),
+       state   = COALESCE($4, state),
+       country = COALESCE($5, country),
+       updated_at = NOW()
+     WHERE id = $1`,
+    [homeId, input.name ?? null, input.city ?? null, input.state ?? null, input.country ?? null],
+  )
+  return { success: true }
+}
+
+export async function deleteHome(slug: string, requesterId: string, homeId: string) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+  await getHomeInCommunity(homeId, community.id)
+
+  await query(`UPDATE homes SET deleted_at = NOW() WHERE id = $1`, [homeId])
+  await query(`UPDATE home_members SET deleted_at = NOW() WHERE home_id = $1 AND deleted_at IS NULL`, [homeId])
+  logger.info({ homeId, communityId: community.id }, 'home deleted')
+  return { success: true }
+}
+
+export async function addHomeMembers(slug: string, requesterId: string, homeId: string, personIds: string[]) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+  await getHomeInCommunity(homeId, community.id)
+  const ids = [...new Set(personIds ?? [])]
+  await assertPersonsInCommunity(ids, community.id)
+  // One home per person → refuse if any is already housed elsewhere.
+  await assertNoneAlreadyInHome(ids)
+
+  for (const pid of ids) {
+    await query(`INSERT INTO home_members (home_id, person_id) VALUES ($1, $2)`, [homeId, pid])
+  }
+  await recomputeHomeHead(homeId)
+  return { success: true }
+}
+
+export async function removeHomeMember(slug: string, requesterId: string, homeId: string, personId: string) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+  await getHomeInCommunity(homeId, community.id)
+
+  await query(
+    `UPDATE home_members SET deleted_at = NOW()
+     WHERE home_id = $1 AND person_id = $2 AND deleted_at IS NULL`,
+    [homeId, personId],
+  )
+  await recomputeHomeHead(homeId)
+  return { success: true }
 }
 
 /**

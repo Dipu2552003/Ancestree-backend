@@ -8,6 +8,7 @@ import { createPossibleMatchNotification } from './notification.service'
 import { logger } from '../utils/logger'
 import { badRequest, forbidden, notFound } from '../utils/errors'
 import * as personsRepo from '../repositories/persons.repo'
+import { recomputeHeads } from './familyHead.service'
 import * as relsRepo from '../repositories/relationships.repo'
 
 // NOTE: the person_code_seq bump is deliberately NOT audited — it is a
@@ -103,6 +104,10 @@ export async function createPerson(
   )
 
   logger.info({ personId: person.id, familyId, name: input.full_name }, 'person created')
+
+  // Refresh cluster head + the new node's lineage head (itself until a PARENT_OF
+  // edge is added).
+  await recomputeHeads(familyId)
 
   const potential_matches = await searchDuplicates({
     fullName:      input.full_name,
@@ -486,6 +491,11 @@ export async function deletePerson(id: string, userId: string, familyId: string)
 
     logger.info({ personId: id, userId, softDeleted }, 'person deleted')
   })
+
+  // Deleting a person can split a lineage (e.g. removing a father orphans his
+  // children into their own patrilines) and change the topmost ancestor —
+  // re-stamp cluster + lineage heads.
+  await recomputeHeads(familyId)
 
   return { success: true }
 }

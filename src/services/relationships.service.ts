@@ -4,6 +4,10 @@ import { CreateRelationshipInput, UpdateRelationshipInput, ACTIVE_SPOUSE_SUBTYPE
 import { logger } from '../utils/logger'
 import { badRequest, notFound, conflict } from '../utils/errors'
 import * as relsRepo from '../repositories/relationships.repo'
+import { recomputeHeads } from './familyHead.service'
+
+// Lineage membership only changes on these edge types; SPOUSE_OF is ignored.
+const LINEAGE_EDGE = new Set(['PARENT_OF', 'SIBLING_OF'])
 
 function defaultSubType(rel_type: CreateRelationshipInput['rel_type']): string {
   if (rel_type === 'SPOUSE_OF')  return 'married'
@@ -104,6 +108,8 @@ export async function createRelationship(
   )
 
   logger.info({ relId: rel.id, from: input.from_person_id, to: input.to_person_id, type: input.rel_type, familyId }, 'relationship created')
+
+  if (LINEAGE_EDGE.has(input.rel_type)) await recomputeHeads(familyId)
   return rel
 }
 
@@ -337,11 +343,13 @@ export async function getRelationshipById(id: string, familyId: string) {
 }
 
 export async function deleteRelationship(id: string, userId: string, familyId: string) {
-  await getRelationshipById(id, familyId)
+  const rel = await getRelationshipById(id, familyId)
   await withOperation(
     { action: 'relationship.delete', actorId: userId, familyId },
     op => relsRepo.softDeleteById(id, op),
   )
   logger.info({ relId: id, familyId }, 'relationship deleted')
+
+  if (LINEAGE_EDGE.has((rel as { rel_type: string }).rel_type)) await recomputeHeads(familyId)
   return { success: true }
 }

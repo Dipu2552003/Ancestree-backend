@@ -14,6 +14,7 @@ import {
 } from '../utils/audit'
 import { logger } from '../utils/logger'
 import { notFound, forbidden, conflict, badRequest } from '../utils/errors'
+import { recomputeHeads } from './familyHead.service'
 
 interface AuditRow {
   id: string
@@ -329,6 +330,16 @@ export async function undoOperation(operationId: string, userId: string, familyI
 
     return { undone_operation_id: operationId, undo_operation_id: op.operationId, reverted_entries: reverted }
   })
+
+  // Re-derive lineage heads for every family this undo touched — a reverted
+  // merge / person / relationship change can reshape patrilines. Derived data,
+  // so this runs post-commit; a failure here never rolls the undo back.
+  const touchedFamilies = new Set<string>([familyId])
+  for (const r of rows) if (r.family_id) touchedFamilies.add(r.family_id)
+  for (const fid of touchedFamilies) {
+    await recomputeHeads(fid).catch(err =>
+      logger.error({ err, familyId: fid }, 'undo: head recompute failed (non-fatal)'))
+  }
 
   logger.info({ ...result, userId, familyId, targetAction }, 'operation undone')
   return result

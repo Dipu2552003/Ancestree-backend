@@ -9,6 +9,7 @@ import { logger } from './utils/logger'
 import { isAppError } from './utils/errors'
 import { runMigrations } from '../database/migrate'
 import { seedCommunityFields } from '../database/seedCommunityFields'
+import { backfillFamilyHeadsOnce } from './services/familyHead.service'
 import authRoutes          from './routes/auth.routes'
 import personsRoutes       from './routes/persons.routes'
 import relationshipsRoutes from './routes/relationships.routes'
@@ -129,6 +130,11 @@ async function start() {
     }
     app.listen(PORT, () => {
       logger.info({ port: PORT }, 'server started')
+      // One-time family_head_id backfill for pre-existing data. Runs in the
+      // background so it never delays startup or the health check; self-guards
+      // via a schema_migrations marker, retries next boot on failure.
+      backfillFamilyHeadsOnce().catch(err =>
+        logger.error({ err }, 'family-head backfill failed (will retry next boot)'))
     })
   } catch (err) {
     logger.error({ err }, 'failed to start server')

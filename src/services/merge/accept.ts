@@ -6,7 +6,7 @@
 
 import { withOperation, captureAndUpdate, captureAndDelete, auditCreate, type Snapshot } from '../../utils/audit'
 import { createNotification, notifyFamily } from '../notification.service'
-import { recomputeFamilyHead } from '../familyHead.service'
+import { recomputeFamilyHead, recomputeFamilyHeads } from '../familyHead.service'
 import { detectMergeConflicts, type MergeConflict, type ConflictContext } from '../mergeConflicts.service'
 import { logger } from '../../utils/logger'
 import { forbidden, notFound } from '../../utils/errors'
@@ -412,10 +412,14 @@ export async function acceptMerge(
     mergeRecordId,
   )
 
-  // Step 9: Recompute family head for both families
+  // Step 9: Recompute cluster head (families.head_person_id) AND per-person
+  // family heads (persons.family_head_id) for both families. A same-bloodline
+  // merge collapses two lineages into one; a marriage-link merge keeps both.
   await recomputeFamilyHead(txResult.canonFamilyId)
+  await recomputeFamilyHeads(txResult.canonFamilyId)
   if (txResult.mergedFamilyId && txResult.mergedFamilyId !== txResult.canonFamilyId) {
     await recomputeFamilyHead(txResult.mergedFamilyId)
+    await recomputeFamilyHeads(txResult.mergedFamilyId)
   }
 
   // Notify both families about potential name change

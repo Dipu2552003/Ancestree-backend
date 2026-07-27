@@ -11,6 +11,8 @@
     "build": "tsc && node scripts/copy-sql.js",
     "start": "node dist/src/index.js",
     "verify:recovery": "ts-node database/verifyRecovery.ts",
+    "backfill:family-heads": "ts-node scripts/backfill-family-heads.ts",
+    "test:family-heads": "ts-node scripts/test-family-heads.ts",
     "check:owners": "ts-node scripts/check-owner-dupes.ts",
     "seed:fields": "ts-node scripts/seed-field-options.ts"
   },
