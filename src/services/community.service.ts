@@ -1,7 +1,8 @@
 import bcrypt from 'bcrypt'
 import crypto from 'crypto'
 import pool, { query } from '../utils/db'
-import { deletePerson } from './persons.service'
+import { deletePerson, createPerson, updatePerson } from './persons.service'
+import type { UpdatePersonInput } from '../schemas/person.schema'
 import { withOperation, auditCreate, captureAndUpdate, type Snapshot } from '../utils/audit'
 import { signToken } from '../utils/jwt'
 import { logger } from '../utils/logger'
@@ -941,6 +942,59 @@ export async function listCommunityFamilies(slug: string, requesterId: string) {
     [community.id],
   )
   return { families: rows }
+}
+
+/** Admin: create a brand-new independent cluster (a `families` row) plus its
+ *  first person. Unlike the signup/join path, no user account is involved — the
+ *  admin is seeding a fresh tree for others, so the first node stays a `proxy`
+ *  (unclaimed). Returns the ids so the client can deep-link into the new tree. */
+export async function createClusterInCommunity(
+  slug: string,
+  requesterId: string,
+  input: { name?: string; person_name?: string; person?: Record<string, unknown> },
+) {
+  const community = await getBySlug(slug)
+  await assertAdmin(community.id, requesterId)
+
+  const personName = input.person_name?.trim()
+  if (!personName) throw badRequest('A first person name is required')
+  const displayName = input.name?.trim() || personName
+  const namePrefix = await uniquePrefix(buildNamePrefix(displayName))
+
+  const family = await withOperation(
+    { action: 'family.create', actorId: requesterId },
+    async op => {
+      const { rows: [family] } = await op.tx.query<Snapshot & { id: string }>(
+        `INSERT INTO families (name, name_prefix, created_by, community_id)
+         VALUES ($1, $2, $3, $4) RETURNING *`,
+        [`${displayName} Family`, namePrefix, requesterId, community.id],
+      )
+      op.familyId = family.id
+      await auditCreate(op, 'family', family)
+      return family
+    },
+  )
+
+  // createPerson handles person_code, community scope/visibility, constant
+  // autofill, head recompute, audit and duplicate search.
+  const person = await createPerson(
+    { full_name: personName, is_alive: true, visibility: 'community' },
+    requesterId, family.id,
+  ) as unknown as { id: string }  // createPerson spreads the person row (incl. id) but returns a loosely-typed match payload
+
+  // Apply the remaining community person fields the admin filled in (DOB, gotra,
+  // native/current place, name parts…) — the same field set as community signup.
+  // full_name is already set above. Scoped to the new family; the admin is
+  // already authorised via assertAdmin, so this reuses updatePerson safely.
+  const extras = { ...(input.person ?? {}) }
+  delete extras.full_name
+  const hasExtras = Object.values(extras).some(v => v !== undefined && v !== null && v !== '')
+  if (hasExtras) {
+    await updatePerson(person.id, extras as UpdatePersonInput, requesterId, family.id)
+  }
+
+  logger.info({ communityId: community.id, requesterId, familyId: family.id, personId: person.id }, 'admin created cluster')
+  return { family_id: family.id, person_id: person.id }
 }
 
 // ── Homes ─────────────────────────────────────────────────────────────────────

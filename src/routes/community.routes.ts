@@ -20,7 +20,7 @@ import {
   communityLogin, communitySignup, sendSignupCode, peekSignupCode, joinCommunity, leaveCommunity,
   sendLoginOtp, loginWithOtp,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
-  listCommunityFamilies, listCommunities, getJoinCode, resetJoinCode,
+  listCommunityFamilies, createClusterInCommunity, listCommunities, getJoinCode, resetJoinCode,
   getMyCommunityRole, getCommunityStats, getCommunityHealth,
   revokeNodeOwnership, adminDeleteNode, deleteUserAccount,
   listCommunityHomes, searchCommunityHomes, createHome, updateHome, deleteHome, addHomeMembers, removeHomeMember,
@@ -334,6 +334,16 @@ router.post('/:slug/join-code/reset', requireAuth, asyncHandler(async (req: Requ
 router.get('/:slug/families', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const result = await listCommunityFamilies(req.params['slug'] as string, req.user.userId)
   res.json(result)
+}))
+
+// Admin: create a new independent cluster (family row) + its first person.
+router.post('/:slug/families', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const b = req.body ?? {}
+  const result = await createClusterInCommunity(req.params['slug'] as string, req.user.userId, {
+    name: b.name, person_name: b.person_name,
+    person: b.person && typeof b.person === 'object' ? b.person : undefined,
+  })
+  res.status(201).json(result)
 }))
 
 // Admin data-health: 1:1 ownership issues + whether the constraint is live.
