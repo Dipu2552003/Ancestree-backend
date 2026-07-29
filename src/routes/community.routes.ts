@@ -217,6 +217,7 @@ router.post('/:slug/homes', requireAuth, asyncHandler(async (req: Request, res: 
   const b = req.body ?? {}
   const result = await createHome(req.params['slug'] as string, req.user.userId, {
     name: b.name, city: b.city, state: b.state, country: b.country,
+    head_person_id: b.head_person_id,
     person_ids: Array.isArray(b.person_ids) ? b.person_ids : [],
   })
   res.status(201).json(result)
@@ -225,7 +226,7 @@ router.post('/:slug/homes', requireAuth, asyncHandler(async (req: Request, res: 
 router.patch('/:slug/homes/:id', requireAuth, asyncHandler(async (req: Request, res: Response) => {
   const b = req.body ?? {}
   const result = await updateHome(req.params['slug'] as string, req.user.userId, req.params['id'] as string, {
-    name: b.name, city: b.city, state: b.state, country: b.country,
+    name: b.name, city: b.city, state: b.state, country: b.country, head_person_id: b.head_person_id,
   })
   res.json(result)
 }))

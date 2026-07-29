@@ -947,8 +947,10 @@ export async function listCommunityFamilies(slug: string, requesterId: string) {
 //
 // A home is a set of people who physically live together, independent of lineage.
 // Community-scoped and admin-managed. The home head (whose perspective opens on
-// click) is auto-picked with the same ranking as the family/cluster head:
-// male → earliest birth_year → lowest person_code.
+// click) is chosen explicitly — never by birthdate. On creation the client
+// defaults it to the eldest by generation hierarchy; an admin can change it, add
+// members, or remove members from the dashboard. Removing the head clears it
+// until an admin picks a new one.
 
 // One home per person for now. Enforced by blocking (below), not by a DB unique
 // constraint — the join table stays many-to-many so this can be relaxed later
@@ -975,23 +977,6 @@ async function assertNoneAlreadyInHome(personIds: string[], run: Runner = query)
       `${names} ${rows.length === 1 ? 'is' : 'are'} already in a home. Remove ${rows.length === 1 ? 'them' : 'them'} from that home first.`,
     )
   }
-}
-
-/** Re-pick a home's head from its current active members. */
-async function recomputeHomeHead(homeId: string, run: Runner = query): Promise<void> {
-  await run(
-    `UPDATE homes SET head_person_id = (
-       SELECT p.id
-       FROM   home_members hm
-       JOIN   persons p ON p.id = hm.person_id AND p.deleted_at IS NULL
-       WHERE  hm.home_id = $1 AND hm.deleted_at IS NULL
-       ORDER  BY CASE WHEN p.gender = 'male' THEN 0 ELSE 1 END,
-                 p.birth_year ASC NULLS LAST, p.person_code ASC
-       LIMIT 1
-     ), updated_at = NOW()
-     WHERE id = $1`,
-    [homeId],
-  )
 }
 
 /** Assert every id is a live person whose family belongs to this community. */
@@ -1076,7 +1061,7 @@ export async function searchCommunityHomes(communityId: string, f: { q?: string 
 
 export async function createHome(
   slug: string, requesterId: string,
-  input: { name?: string | null; city?: string | null; state?: string | null; country?: string | null; person_ids: string[] },
+  input: { name?: string | null; city?: string | null; state?: string | null; country?: string | null; person_ids: string[]; head_person_id?: string | null },
 ) {
   const community = await getBySlug(slug)
   await assertAdmin(community.id, requesterId)
@@ -1084,16 +1069,24 @@ export async function createHome(
   const personIds = [...new Set(input.person_ids ?? [])]
   await assertPersonsInCommunity(personIds, community.id)
 
+  // The head is chosen by the caller (defaulted to the eldest by generation on the
+  // client) and must be one of the members. When absent, fall back to the ranked
+  // auto-pick below.
+  const headId = input.head_person_id ?? null
+  if (headId && !personIds.includes(headId)) {
+    throw badRequest('The chosen head must be one of the selected people')
+  }
+
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     const run = client.query.bind(client) as Runner
 
     const { rows: [home] } = await run<{ id: string }>(
-      `INSERT INTO homes (community_id, name, city, state, country, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      `INSERT INTO homes (community_id, name, city, state, country, head_person_id, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
       [community.id, input.name?.trim() || null, input.city?.trim() || null,
-       input.state?.trim() || null, input.country?.trim() || null, requesterId],
+       input.state?.trim() || null, input.country?.trim() || null, headId, requesterId],
     )
 
     // One home per person → refuse if anyone is already housed (names them).
@@ -1101,7 +1094,6 @@ export async function createHome(
     for (const pid of personIds) {
       await run(`INSERT INTO home_members (home_id, person_id) VALUES ($1, $2)`, [home.id, pid])
     }
-    await recomputeHomeHead(home.id, run)
 
     await client.query('COMMIT')
     logger.info({ homeId: home.id, members: personIds.length, communityId: community.id }, 'home created')
@@ -1126,11 +1118,21 @@ async function getHomeInCommunity(homeId: string, communityId: string): Promise<
 
 export async function updateHome(
   slug: string, requesterId: string, homeId: string,
-  input: { name?: string | null; city?: string | null; state?: string | null; country?: string | null },
+  input: { name?: string | null; city?: string | null; state?: string | null; country?: string | null; head_person_id?: string | null },
 ) {
   const community = await getBySlug(slug)
   await assertAdmin(community.id, requesterId)
   await getHomeInCommunity(homeId, community.id)
+
+  // Head change is user-driven — the new head must be a current member of the home.
+  if (input.head_person_id) {
+    const { rows } = await query(
+      `SELECT 1 FROM home_members WHERE home_id = $1 AND person_id = $2 AND deleted_at IS NULL`,
+      [homeId, input.head_person_id],
+    )
+    if (rows.length === 0) throw badRequest('The head must be a member of this home')
+    await query(`UPDATE homes SET head_person_id = $2, updated_at = NOW() WHERE id = $1`, [homeId, input.head_person_id])
+  }
 
   await query(
     `UPDATE homes SET
@@ -1168,7 +1170,7 @@ export async function addHomeMembers(slug: string, requesterId: string, homeId: 
   for (const pid of ids) {
     await query(`INSERT INTO home_members (home_id, person_id) VALUES ($1, $2)`, [homeId, pid])
   }
-  await recomputeHomeHead(homeId)
+  // Adding a member never changes the head — it's chosen explicitly by the admin.
   return { success: true }
 }
 
@@ -1182,7 +1184,12 @@ export async function removeHomeMember(slug: string, requesterId: string, homeId
      WHERE home_id = $1 AND person_id = $2 AND deleted_at IS NULL`,
     [homeId, personId],
   )
-  await recomputeHomeHead(homeId)
+  // If the removed person was the head, clear it — an admin picks a new head.
+  await query(
+    `UPDATE homes SET head_person_id = NULL, updated_at = NOW()
+     WHERE id = $1 AND head_person_id = $2`,
+    [homeId, personId],
+  )
   return { success: true }
 }
 
