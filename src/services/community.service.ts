@@ -835,7 +835,7 @@ export async function getCommunityMembers(slug: string, requesterId: string) {
   // own person node (so the UI can deep-link to their tree). Newest signup first
   // — joined_at is when they joined the community, i.e. when they signed up.
   const { rows } = await query(
-    `SELECT u.id, u.email, u.display_name, cm.role, cm.joined_at,
+    `SELECT u.id, u.email, u.display_name, cm.role, cm.level, cm.joined_at,
             u.person_id,
             p.full_name  AS person_name,
             p.photo_url,
