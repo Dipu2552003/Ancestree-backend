@@ -1,6 +1,7 @@
 import { query } from '../utils/db'
 import { logger } from '../utils/logger'
 import { notFound } from '../utils/errors'
+import { LEVEL } from '../utils/accessLevels'
 
 // A syntactically valid UUID that matches no real user/family. Passed as the
 // "viewer" identity for the public, unauthenticated tree view so every node is
@@ -265,8 +266,8 @@ export async function fetchFamilyGraph(
     // edit + add-relation rights on this cluster's nodes even when it isn't their
     // own family — the cross-cluster admin power. Writes are re-verified server-
     // side by the actAsFamily middleware, so this only drives what the UI offers.
-    query<{ role: string }>(
-      `SELECT cm.role
+    query<{ level: number }>(
+      `SELECT cm.level
        FROM   families f
        JOIN   community_members cm ON cm.community_id = f.community_id AND cm.user_id = $2
        WHERE  f.id = $1`,
@@ -277,7 +278,7 @@ export async function fetchFamilyGraph(
   const isAdmin = membership?.role === 'admin'
   // ponytail: single bool for the graph's community; a stray merged node from
   // another community could show Edit, but the write is still 403'd server-side.
-  const isCommunityAdmin = communityMember?.role === 'owner' || communityMember?.role === 'admin'
+  const isCommunityAdmin = (communityMember?.level ?? -1) >= LEVEL.ADMIN
 
   let selfId: string | undefined
   if (perspectivePersonId && persons.some(p => p.id === perspectivePersonId)) {

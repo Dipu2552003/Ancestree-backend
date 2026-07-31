@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express'
 import { query } from '../utils/db'
 import { asyncHandler } from './asyncHandler'
+import { LEVEL } from '../utils/accessLevels'
 
 /**
  * Cross-cluster admin writes.
@@ -21,15 +22,16 @@ export const actAsFamily = asyncHandler(async (req: Request, _res: Response, nex
   const target = req.header('x-act-family')
   if (!target || target === req.user.familyId) return next()
 
-  const { rows: [row] } = await query<{ role: string }>(
-    `SELECT cm.role
+  const { rows: [row] } = await query<{ level: number }>(
+    `SELECT cm.level
      FROM   families f
      JOIN   community_members cm ON cm.community_id = f.community_id AND cm.user_id = $2
      WHERE  f.id = $1 AND f.deleted_at IS NULL
        AND  f.community_id = (SELECT community_id FROM families WHERE id = $3)`,
     [target, req.user.userId, req.user.familyId],
   )
-  if (row && (row.role === 'owner' || row.role === 'admin')) {
+  // Cross-cluster writes require Admin (level 3) or Owner (4) in that community.
+  if (row && row.level >= LEVEL.ADMIN) {
     req.user.familyId = target
   }
   next()

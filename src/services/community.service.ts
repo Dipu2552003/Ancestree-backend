@@ -8,6 +8,7 @@ import { signToken } from '../utils/jwt'
 import { logger } from '../utils/logger'
 import { sendMail, brandEmail } from '../utils/email'
 import { badRequest, unauthorized, notFound, conflict, forbidden, serverError } from '../utils/errors'
+import { LEVEL, DEFAULT_LEVEL, MAX_ASSIGNABLE_LEVEL } from '../utils/accessLevels'
 import type {
   CreateCommunityInput, CommunityLoginInput, CommunitySignupInput,
   InviteToCommunityInput, UpdateMemberRoleInput,
@@ -115,12 +116,20 @@ export async function replaceFieldOptions(
   return getFieldConfig(slug)
 }
 
-async function assertAdmin(communityId: string, userId: string): Promise<void> {
-  const { rows: [member] } = await query<{ role: string }>(
-    `SELECT role FROM community_members WHERE community_id = $1 AND user_id = $2`,
+/** The requester's access level in a community, or null if not a member. */
+async function memberLevel(communityId: string, userId: string): Promise<number | null> {
+  const { rows: [member] } = await query<{ level: number }>(
+    `SELECT level FROM community_members WHERE community_id = $1 AND user_id = $2`,
     [communityId, userId],
   )
-  if (!member || !['owner', 'admin'].includes(member.role)) {
+  return member ? member.level : null
+}
+
+/** Admin gate — now level-based (>= ADMIN covers both admins and the owner).
+ *  Kept under the same name so every existing caller is unchanged. */
+async function assertAdmin(communityId: string, userId: string): Promise<void> {
+  const lvl = await memberLevel(communityId, userId)
+  if (lvl == null || lvl < LEVEL.ADMIN) {
     throw forbidden('Community admin access required')
   }
 }
@@ -142,14 +151,41 @@ export async function getCommunityStats(slug: string) {
  *  role-gated tools (e.g. the owner's merge console). */
 export async function getMyCommunityRole(slug: string, userId: string) {
   const community = await getBySlug(slug)
-  const { rows: [member] } = await query<{ role: string }>(
-    `SELECT role FROM community_members WHERE community_id = $1 AND user_id = $2`,
+  const { rows: [member] } = await query<{ role: string; level: number }>(
+    `SELECT role, level FROM community_members WHERE community_id = $1 AND user_id = $2`,
     [community.id, userId],
   )
   return {
     role:     member?.role ?? null,
+    level:    member?.level ?? null,
     is_owner: community.owner_id === userId,
   }
+}
+
+/** Owner-only: set a member's access level (0–3; OWNER is transfer-only). Keeps
+ *  the legacy `role` loosely in sync so any remaining role reads stay sane. */
+export async function setMemberLevel(
+  slug: string, targetUserId: string, level: number, requesterId: string,
+) {
+  const community = await getBySlug(slug)
+  if (community.owner_id !== requesterId) {
+    throw forbidden('Only the community owner can change access levels')
+  }
+  if (targetUserId === community.owner_id) {
+    throw forbidden('The owner’s level can’t be changed — transfer ownership instead')
+  }
+  if (!Number.isInteger(level) || level < LEVEL.VIEWER || level > MAX_ASSIGNABLE_LEVEL) {
+    throw badRequest('Level must be an integer from 0 (Viewer) to 3 (Admin)')
+  }
+
+  const { rowCount } = await query(
+    `UPDATE community_members SET role = $1, level = $2 WHERE community_id = $3 AND user_id = $4`,
+    [level >= LEVEL.ADMIN ? 'admin' : 'member', level, community.id, targetUserId],
+  )
+  if (!rowCount) throw notFound('Member not found in this community')
+
+  logger.info({ communityId: community.id, targetUserId, level, requesterId }, 'member access level set')
+  return { success: true, level }
 }
 
 function buildNamePrefix(displayName: string): string {
@@ -224,8 +260,8 @@ export async function createCommunity(input: CreateCommunityInput) {
     )
 
     await tx.query(
-      `INSERT INTO community_members (community_id, user_id, role) VALUES ($1, $2, 'owner')`,
-      [community.id, user.id],
+      `INSERT INTO community_members (community_id, user_id, role, level) VALUES ($1, $2, 'owner', $3)`,
+      [community.id, user.id, LEVEL.OWNER],
     )
 
     return { user, community, family, person }
@@ -617,8 +653,8 @@ export async function communitySignup(slug: string, input: CommunitySignupInput)
     )
 
     await tx.query(
-      `INSERT INTO community_members (community_id, user_id, role) VALUES ($1, $2, 'member')`,
-      [community.id, user.id],
+      `INSERT INTO community_members (community_id, user_id, role, level) VALUES ($1, $2, 'member', $3)`,
+      [community.id, user.id, DEFAULT_LEVEL],
     )
 
     if (inviteId) {
@@ -729,8 +765,8 @@ export async function joinCommunity(
       await auditCreate(op, 'person', person)
 
       await tx.query(
-        `INSERT INTO community_members (community_id, user_id, role) VALUES ($1, $2, $3)`,
-        [community.id, userId, inviteRole],
+        `INSERT INTO community_members (community_id, user_id, role, level) VALUES ($1, $2, $3, $4)`,
+        [community.id, userId, inviteRole, inviteRole === 'admin' ? LEVEL.ADMIN : DEFAULT_LEVEL],
       )
 
       if (inviteId) {

@@ -21,7 +21,7 @@ import {
   sendLoginOtp, loginWithOtp,
   inviteToCommunity, getCommunityMembers, updateMemberRole, removeMember,
   listCommunityFamilies, createClusterInCommunity, listCommunities, getJoinCode, resetJoinCode,
-  getMyCommunityRole, getCommunityStats, getCommunityHealth,
+  getMyCommunityRole, setMemberLevel, getCommunityStats, getCommunityHealth,
   revokeNodeOwnership, adminDeleteNode, deleteUserAccount,
   listCommunityHomes, searchCommunityHomes, createHome, updateHome, deleteHome, addHomeMembers, removeHomeMember,
 } from '../services/community.service'
@@ -300,6 +300,18 @@ router.put('/:slug/members/:uid', requireAuth, validate(updateMemberRoleSchema),
     req.params['slug'] as string,
     req.params['uid'] as string,
     req.validated as UpdateMemberRoleInput,
+    req.user.userId,
+  )
+  res.json(result)
+}))
+
+// Owner-only: set a member's access level (0 Viewer … 3 Admin). Level 4 (Owner)
+// is reserved for ownership transfer, not this endpoint.
+router.put('/:slug/members/:uid/level', requireAuth, asyncHandler(async (req: Request, res: Response) => {
+  const result = await setMemberLevel(
+    req.params['slug'] as string,
+    req.params['uid'] as string,
+    Number(req.body?.level),
     req.user.userId,
   )
   res.json(result)
