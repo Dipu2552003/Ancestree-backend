@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { z } from 'zod'
 import { requireAuth } from '../middleware/auth'
+import { actAsFamily } from '../middleware/actAsFamily'
 import { asyncHandler } from '../middleware/asyncHandler'
 import { validate } from '../middleware/validate'
 import {
@@ -43,6 +44,8 @@ type ReorderInput = z.infer<typeof reorderSchema>
 
 const router = Router()
 router.use(requireAuth)
+// Lets a community owner/admin scope a write to another cluster (via X-Act-Family).
+router.use(actAsFamily)
 
 router.post('/', validate(createPersonSchema), asyncHandler(async (req: Request, res: Response) => {
   const input = req.validated as CreatePersonInput

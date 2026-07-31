@@ -106,6 +106,7 @@ export async function searchPersons(
   familyId: string,
   scope: SearchScope = 'all',
   communityId: string | null = null,
+  filters: { gender?: string; ageMin?: number; ageMax?: number } = {},
 ) {
   if (!q || q.trim().length < 2) {
     return { results: [] }
@@ -133,6 +134,23 @@ export async function searchPersons(
     boundary = `AND p.community_id IS NULL AND f.visibility = 'public' ${familyClause}`
   }
 
+  // Optional refine filters (gender / age). Age → birth_year range; people with
+  // an unknown birth_year are excluded once an age bound is set (can't place them).
+  const refine: string[] = []
+  if (filters.gender === 'male' || filters.gender === 'female') {
+    params.push(filters.gender)
+    refine.push(`AND p.gender = $${params.length}`)
+  }
+  const nowYear = new Date().getFullYear()
+  if (filters.ageMin != null && Number.isFinite(filters.ageMin)) {
+    params.push(String(nowYear - filters.ageMin))
+    refine.push(`AND p.birth_year IS NOT NULL AND p.birth_year <= $${params.length}`)
+  }
+  if (filters.ageMax != null && Number.isFinite(filters.ageMax)) {
+    params.push(String(nowYear - filters.ageMax))
+    refine.push(`AND p.birth_year IS NOT NULL AND p.birth_year >= $${params.length}`)
+  }
+
   const { rows } = await query(
     `SELECT p.id, p.full_name, p.birth_year, p.node_state, p.photo_url,
             p.native_village, p.current_city,
@@ -144,6 +162,7 @@ export async function searchPersons(
      ${FATHER_SUBQUERY}
      WHERE  p.deleted_at IS NULL
        ${boundary}
+       ${refine.join('\n       ')}
        AND  (p.full_name ILIKE $1 OR similarity(p.full_name, $2) > 0.2)
      ORDER  BY
        (p.primary_family_id = $3) DESC,

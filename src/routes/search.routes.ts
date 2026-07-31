@@ -24,7 +24,14 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
                                         : 'all'
   // Community users only see results within their walled garden
   const communityId = req.user.communityId ?? null
-  const results = await searchPersons(q, req.user.familyId, scope, communityId)
+  const num = (v: unknown) => {
+    const n = Number(v)
+    return typeof v === 'string' && v.trim() !== '' && Number.isFinite(n) ? n : undefined
+  }
+  const gender = req.query.gender === 'male' || req.query.gender === 'female' ? req.query.gender : undefined
+  const results = await searchPersons(q, req.user.familyId, scope, communityId, {
+    gender, ageMin: num(req.query.age_min), ageMax: num(req.query.age_max),
+  })
   res.json(results)
 }))
 

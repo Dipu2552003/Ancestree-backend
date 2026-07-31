@@ -220,7 +220,7 @@ export async function fetchFamilyGraph(
   // so the returned node_state / canInvite reflect the reverted 'proxy' status.
   await expireStaleInvites(familyId)
 
-  const [{ rows: persons }, { rows: rels }, { rows: [membership] }] = await Promise.all([
+  const [{ rows: persons }, { rows: rels }, { rows: [membership] }, { rows: [communityMember] }] = await Promise.all([
     query<DBPerson>(
       // Fetch this family's own persons PLUS any cross-family persons that are
       // directly referenced by this family's relationship rows.  This makes
@@ -261,9 +261,23 @@ export async function fetchFamilyGraph(
       `SELECT role FROM family_members WHERE family_id = $1 AND user_id = $2`,
       [familyId, userId]
     ),
+    // The viewer's role in THIS family's community (if any). Owner/admin gets
+    // edit + add-relation rights on this cluster's nodes even when it isn't their
+    // own family — the cross-cluster admin power. Writes are re-verified server-
+    // side by the actAsFamily middleware, so this only drives what the UI offers.
+    query<{ role: string }>(
+      `SELECT cm.role
+       FROM   families f
+       JOIN   community_members cm ON cm.community_id = f.community_id AND cm.user_id = $2
+       WHERE  f.id = $1`,
+      [familyId, userId]
+    ),
   ])
 
   const isAdmin = membership?.role === 'admin'
+  // ponytail: single bool for the graph's community; a stray merged node from
+  // another community could show Edit, but the write is still 403'd server-side.
+  const isCommunityAdmin = communityMember?.role === 'owner' || communityMember?.role === 'admin'
 
   let selfId: string | undefined
   if (perspectivePersonId && persons.some(p => p.id === perspectivePersonId)) {
@@ -321,8 +335,12 @@ export async function fetchFamilyGraph(
       // Any family member can open the panel and add connections to any node.
       // Only the node's creator or claimer can edit the profile fields.
       // Cross-family canonical nodes (primary_family_id differs) are fully read-only.
-      canEdit:            p.primary_family_id === userFamilyId,
-      canEditProfile:     p.primary_family_id === userFamilyId && (p.node_state === 'claimed' ? p.claimed_by === userId : true),
+      // Community owner/admins get the same edit + add-relation rights on this
+      // community's nodes as a member of the node's own family would. A node
+      // another real user has CLAIMED stays private to them (canEditProfile
+      // false) — only unclaimed/proxy nodes are admin-editable.
+      canEdit:            p.primary_family_id === userFamilyId || isCommunityAdmin,
+      canEditProfile:     (p.primary_family_id === userFamilyId || isCommunityAdmin) && (p.node_state === 'claimed' ? p.claimed_by === userId : true),
       // Claimed nodes belong to a real user — no one can hard-delete them,
       // only disconnect (remove relationships). Proxy/invited nodes can be
       // deleted freely by any family member, except the viewer's own node.
@@ -398,6 +416,9 @@ export async function fetchFamilyGraph(
     edges,
     meta: {
       totalNodes:              nodes.length,
+      // The family this graph belongs to — the client echoes it back as
+      // X-Act-Family on writes so a community admin can edit another cluster.
+      familyId,
       perspectivePersonId:     selfId,
       effectiveAncestorDepth:   ancestorClamp,
       effectiveDescendantDepth: descendantClamp,

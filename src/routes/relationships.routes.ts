@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { requireAuth } from '../middleware/auth'
+import { actAsFamily } from '../middleware/actAsFamily'
 import { asyncHandler } from '../middleware/asyncHandler'
 import { validate } from '../middleware/validate'
 import {
@@ -13,6 +14,8 @@ import {
 
 const router = Router()
 router.use(requireAuth)
+// Lets a community owner/admin scope a write to another cluster (via X-Act-Family).
+router.use(actAsFamily)
 
 router.post('/', validate(createRelationshipSchema), asyncHandler(async (req: Request, res: Response) => {
   const input = req.validated as CreateRelationshipInput

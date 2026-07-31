@@ -162,6 +162,11 @@ export async function lookupToken(token: string) {
     primary_family_id:       string
     birth_year:              number | null
     photo_url:               string | null
+    // The invited node's OWN pre-filled details, so the claim form can prefill
+    // what was already entered rather than making the invitee re-type them.
+    gotra:                   string | null
+    native_village:          string | null
+    current_city:            string | null
     family_name:             string
     inviter_full_name:       string | null
     inviter_native_village:  string | null
@@ -169,6 +174,7 @@ export async function lookupToken(token: string) {
     inviter_father_name:     string | null
   }>(
     `SELECT p.full_name, p.node_state, p.primary_family_id, p.birth_year, p.photo_url,
+            p.gotra, p.native_village, p.current_city,
             f.name AS family_name,
             inv.full_name      AS inviter_full_name,
             inv.native_village AS inviter_native_village,
