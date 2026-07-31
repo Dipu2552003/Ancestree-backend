@@ -242,7 +242,7 @@ export async function filterCommunityPersons(communityId: string, f: PersonFilte
      ${FATHER_SUBQUERY}
      WHERE  ${where.join('\n       AND ')}
      ORDER  BY p.full_name
-     LIMIT  200`,
+     LIMIT  1000`,   // ponytail: covers the whole community for now; add keyset paging past ~1k
     params,
   )
   logger.debug({ communityId, filters: f, results: rows.length }, 'parivar filter')
