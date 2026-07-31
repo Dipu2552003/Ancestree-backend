@@ -10,6 +10,7 @@ import { badRequest, forbidden, notFound } from '../utils/errors'
 import * as personsRepo from '../repositories/persons.repo'
 import { recomputeHeads } from './familyHead.service'
 import * as relsRepo from '../repositories/relationships.repo'
+import { assertPersonWriteScope, assertCanCreate, assertCanBulkEdit } from './writeScope'
 
 // NOTE: the person_code_seq bump is deliberately NOT audited — it is a
 // monotonic counter and undoing it would hand out already-used (UNIQUE)
@@ -53,6 +54,7 @@ export async function createPerson(
   userId: string,
   familyId: string
 ) {
+  await assertCanCreate(userId, familyId)   // Viewer(0) can't create nodes
   const person = await withOperation(
     { action: 'person.create', actorId: userId, familyId },
     async op => {
@@ -171,6 +173,9 @@ export async function updatePerson(
 ) {
   const person = await getPersonById(id, familyId)
 
+  // Access-level scope (Viewer/Household) — no-op for Family Editor+.
+  await assertPersonWriteScope(userId, familyId, id)
+
   if (person.node_state === 'claimed' && person.claimed_by !== userId) {
     logger.warn({ personId: id, userId, claimedBy: person.claimed_by }, 'updatePerson: forbidden')
     throw forbidden('Only the profile owner can edit a claimed profile')
@@ -250,6 +255,7 @@ export async function updatePerson(
 
 export async function generateInviteToken(id: string, userId: string, familyId: string) {
   const person = await getPersonById(id, familyId)
+  await assertPersonWriteScope(userId, familyId, id)
 
   // 'invited' is allowed too, so a fresh code can be re-issued when the original
   // is lost — and after an invite expires back to 'proxy' it can be sent again.
@@ -348,6 +354,8 @@ export async function bulkUpdatePersons(
     (await isFamilyAdmin(familyId, userId)) ||
     (communityId ? await isCommunityAdmin(communityId, userId) : false)
   if (!allowed) throw forbidden('Only a family or community admin can bulk-edit people')
+  // Access level: bulk edit is a Family Editor+ (cluster-wide) capability.
+  await assertCanBulkEdit(userId, familyId)
 
   const ids = targets.map(t => t.id)
   const setClauses = setEntries.map(([k], i) => `${k} = $${i + 1}`).join(', ')
@@ -429,6 +437,7 @@ async function wouldDisconnectFamily(personId: string, familyId: string): Promis
 
 export async function deletePerson(id: string, userId: string, familyId: string) {
   const person = await getPersonById(id, familyId)
+  await assertPersonWriteScope(userId, familyId, id)
 
   if (person.claimed_by === userId) {
     logger.warn({ personId: id, userId }, 'deletePerson: tried to delete own node')

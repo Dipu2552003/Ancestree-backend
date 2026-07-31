@@ -40,10 +40,14 @@ Cumulative: `level >= REQUIRED`.
   admin-gated endpoint with no caller changes.
 - `actAsFamily` middleware (cross-cluster writes) → gated at `level >= ADMIN`.
 - `graph.service` `isCommunityAdmin` → `level >= ADMIN` (drives canEdit flags).
-- **Pending (next):** graded write-scope on person/relationship writes —
-  Viewer(0) blocks all writes; Household(1) restricts to same-home nodes;
-  Family Editor(2)+ keeps today's cluster scope. Enforced in
-  persons/relationships services using the actor's level + `home_members` lookup.
+- **Graded write-scope** (`services/writeScope.ts`) on every person/relationship
+  write: Viewer(0) blocks writes (except own node); Household(1) restricts to own
+  node + same-home nodes (via `home_members`); Family Editor(2)+ keeps today's
+  cluster scope. Applied in `createPerson` (assertCanCreate), `updatePerson`,
+  `deletePerson`, `generateInviteToken`, `bulkUpdatePersons` (Editor+),
+  `createRelationship`, `updateRelationship`, `deleteRelationship`,
+  `reparentChildren`, `reorderChildren`. Baseline: your own claimed node is always
+  writable; the claimed-by-someone-else wall is unchanged.
 
 ## Dashboard (next)
 Admin → **Access** section: a read-only reference of the 5 levels + this matrix,
@@ -55,5 +59,5 @@ and a per-member level dropdown (0–3), **visible/editable to the owner only**.
 - [x] Default level on create/signup/join
 - [x] `assertAdmin` + `actAsFamily` + `graph.service` on level
 - [x] Owner-only `setMemberLevel` + route; `level` in `/me`
-- [ ] Graded write-scope (Viewer block / Household home-scope)
+- [x] Graded write-scope (Viewer block / Household home-scope)
 - [ ] Dashboard Access section (frontend)

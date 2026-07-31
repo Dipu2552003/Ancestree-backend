@@ -5,6 +5,7 @@ import { logger } from '../utils/logger'
 import { badRequest, notFound, conflict } from '../utils/errors'
 import * as relsRepo from '../repositories/relationships.repo'
 import { recomputeHeads } from './familyHead.service'
+import { assertRelationWriteScope, assertPersonWriteScope } from './writeScope'
 
 // Lineage membership only changes on these edge types; SPOUSE_OF is ignored.
 const LINEAGE_EDGE = new Set(['PARENT_OF', 'SIBLING_OF'])
@@ -47,6 +48,9 @@ export async function createRelationship(
     logger.warn({ from: input.from_person_id, to: input.to_person_id, familyId }, 'createRelationship: persons not found')
     throw notFound('One or both persons not found in your family')
   }
+
+  // Access-level scope (Viewer/Household) — no-op for Family Editor+.
+  await assertRelationWriteScope(userId, familyId, [input.from_person_id, input.to_person_id])
 
   const { rowCount: dup } = await query(
     `SELECT id FROM relationships
@@ -169,12 +173,13 @@ export async function updateRelationship(
   familyId: string,
 ) {
   // Fetch the row first so we know the rel_type (sub_type semantics depend on it).
-  const { rows: [existing] } = await query<{ rel_type: string; sub_type: string | null }>(
-    `SELECT rel_type, sub_type FROM relationships
+  const { rows: [existing] } = await query<{ rel_type: string; sub_type: string | null; from_person_id: string; to_person_id: string }>(
+    `SELECT rel_type, sub_type, from_person_id, to_person_id FROM relationships
      WHERE id = $1 AND primary_family_id = $2 AND deleted_at IS NULL`,
     [id, familyId],
   )
   if (!existing) throw notFound('Relationship not found')
+  await assertRelationWriteScope(userId, familyId, [existing.from_person_id, existing.to_person_id])
 
   const fields: string[] = []
   const values: unknown[] = []
@@ -234,6 +239,7 @@ export async function reparentChildren(
   userId: string,
   familyId: string,
 ): Promise<{ updated: number; skipped: number }> {
+  await assertPersonWriteScope(userId, familyId, fatherId)
   const result = await withOperation({ action: 'person.reparent', actorId: userId, familyId }, async op => {
     let updated = 0
     let skipped = 0
@@ -297,6 +303,7 @@ export async function reorderChildren(
   userId: string,
   familyId: string,
 ): Promise<{ updated: number }> {
+  await assertPersonWriteScope(userId, familyId, parentId)
   if (new Set(orderedChildIds).size !== orderedChildIds.length) {
     throw badRequest('Duplicate child ids in order list')
   }
@@ -343,7 +350,8 @@ export async function getRelationshipById(id: string, familyId: string) {
 }
 
 export async function deleteRelationship(id: string, userId: string, familyId: string) {
-  const rel = await getRelationshipById(id, familyId)
+  const rel = await getRelationshipById(id, familyId) as { rel_type: string; from_person_id: string; to_person_id: string }
+  await assertRelationWriteScope(userId, familyId, [rel.from_person_id, rel.to_person_id])
   await withOperation(
     { action: 'relationship.delete', actorId: userId, familyId },
     op => relsRepo.softDeleteById(id, op),
