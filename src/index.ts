@@ -10,6 +10,7 @@ import { isAppError } from './utils/errors'
 import { runMigrations } from '../database/migrate'
 import { seedCommunityFields } from '../database/seedCommunityFields'
 import { backfillFamilyHeadsOnce } from './services/familyHead.service'
+import { backfillPhotosToR2Once } from './utils/r2'
 import authRoutes          from './routes/auth.routes'
 import personsRoutes       from './routes/persons.routes'
 import relationshipsRoutes from './routes/relationships.routes'
@@ -21,6 +22,7 @@ import notificationsRoutes from './routes/notifications.routes'
 import historyRoutes       from './routes/history.routes'
 import communityRoutes     from './routes/community.routes'
 import familyRoutes        from './routes/family.routes'
+import photosRoutes        from './routes/photos.routes'
 
 dotenv.config()
 
@@ -84,6 +86,7 @@ app.use('/api/notifications', notificationsRoutes)
 app.use('/api/family',        historyRoutes)
 app.use('/api/community',     communityRoutes)
 app.use('/api/family',        familyRoutes)
+app.use('/api/photos',        photosRoutes)
 
 // Global error handler. Recognises:
 //   • ZodError     → 400 with the first issue's message
@@ -135,6 +138,10 @@ async function start() {
       // via a schema_migrations marker, retries next boot on failure.
       backfillFamilyHeadsOnce().catch(err =>
         logger.error({ err }, 'family-head backfill failed (will retry next boot)'))
+      // One-time move of inline data-URL photos into R2. Self-guards via a
+      // schema_migrations marker; retries next boot on failure.
+      backfillPhotosToR2Once().catch(err =>
+        logger.error({ err }, 'R2 photo backfill failed (will retry next boot)'))
     })
   } catch (err) {
     logger.error({ err }, 'failed to start server')

@@ -11,6 +11,7 @@ import * as personsRepo from '../repositories/persons.repo'
 import { recomputeHeads } from './familyHead.service'
 import * as relsRepo from '../repositories/relationships.repo'
 import { assertPersonWriteScope, assertCanCreate, assertCanBulkEdit } from './writeScope'
+import { storePhotoIfDataUrl } from '../utils/r2'
 
 // NOTE: the person_code_seq bump is deliberately NOT audited — it is a
 // monotonic counter and undoing it would hand out already-used (UNIQUE)
@@ -76,27 +77,32 @@ export async function createPerson(
 
       const personCode = await nextPersonCode(familyId, op.tx)
 
+      // Generate the id up front so a photo can be uploaded to R2 under its
+      // stable key before the row is written (audit snapshot stays clean).
+      const id = crypto.randomUUID()
+      const photoStored = await storePhotoIfDataUrl(id, 'photo', input.photo_url)
+
       const { rows: [created] } = await op.tx.query(
         `INSERT INTO persons (
            person_code, primary_family_id, full_name, first_name, last_name,
            nickname, gender, birth_year, birth_place,
            death_year, is_alive, bio, occupation, photo_url, visibility,
            current_city, current_state, current_country, native_village, gotra, education,
-           node_state, created_by, community_id
+           node_state, created_by, community_id, id
          ) VALUES (
            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
            $11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,
-           'proxy',$22,$23
+           'proxy',$22,$23,$24
          ) RETURNING *`,
         [
           personCode, familyId, input.full_name, input.first_name ?? null, effLastName,
           input.nickname ?? null, input.gender ?? null,
           input.birth_year ?? null, input.birth_place ?? null, input.death_year ?? null,
           input.is_alive ?? true, input.bio ?? null, input.occupation ?? null,
-          input.photo_url ?? null, effectiveVisibility,
+          photoStored ?? null, effectiveVisibility,
           input.current_city ?? null, input.current_state ?? null, input.current_country ?? null,
           input.native_village ?? null, input.gotra ?? null, input.education ?? null,
-          userId, communityId,
+          userId, communityId, id,
         ],
       )
 
@@ -194,6 +200,15 @@ export async function updatePerson(
     'gotra', 'education',
     'bio_mother_name', 'bio_father_name',
   ]
+
+  // Move any inline photo data URLs to R2 first, so the column stores the
+  // stable media URL rather than base64. No-op for non-data-URL values.
+  if (input.photo_url !== undefined) {
+    input.photo_url = await storePhotoIfDataUrl(id, 'photo', input.photo_url)
+  }
+  if (input.photo_thumbnail_url !== undefined) {
+    input.photo_thumbnail_url = await storePhotoIfDataUrl(id, 'thumb', input.photo_thumbnail_url)
+  }
 
   const fields = Object.entries(input).filter(
     ([k, v]) => allowed.includes(k) && v !== undefined
