@@ -346,7 +346,10 @@ export async function fetchFamilyGraph(
       // only disconnect (remove relationships). Proxy/invited nodes can be
       // deleted freely by any family member, except the viewer's own node.
       canDelete:          p.primary_family_id === userFamilyId && p.node_state !== 'claimed',
-      canInvite:          p.primary_family_id === userFamilyId && (p.node_state === 'proxy' || p.node_state === 'invited') && p.is_alive,
+      // Community owner/admins can invite proxy nodes in ANY cluster of their
+      // community (actAsFamily authorises the backend write cross-cluster), same
+      // as canEdit above — so the invite card shows on other clusters' nodes too.
+      canInvite:          (p.primary_family_id === userFamilyId || isCommunityAdmin) && (p.node_state === 'proxy' || p.node_state === 'invited') && p.is_alive,
       firstName:          p.first_name,
       middleName:         p.middle_name,
       lastName:           p.last_name,
