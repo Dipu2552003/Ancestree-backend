@@ -63,8 +63,14 @@ app.use(pinoHttp({
     return 'info'
   },
   redact: ['req.headers.authorization'],
-  autoLogging: { ignore: (req) => req.url === '/health' },
+  autoLogging: { ignore: (req) => req.url === '/health' || req.url === '/ping' },
 }))
+
+// Cheap liveness ping for an external keep-alive (UptimeRobot / cron-job.org) to
+// hit every ~10 min so Render's free tier doesn't spin the container down. No DB
+// work on purpose — this only warms the Node process; use /health for the real
+// readiness check that also verifies the database.
+app.get('/ping', (_req, res) => { res.json({ status: 'alive', timestamp: new Date().toISOString() }) })
 
 app.get('/health', async (_req, res) => {
   try {
