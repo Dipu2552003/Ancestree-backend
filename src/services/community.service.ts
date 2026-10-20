@@ -1134,7 +1134,9 @@ export async function searchCommunityHomes(communityId: string, f: { q?: string 
      LEFT   JOIN persons hp ON hp.id = h.head_person_id AND hp.deleted_at IS NULL
      LEFT   JOIN LATERAL (
        SELECT jsonb_agg(jsonb_build_object(
-                'person_id', p.id, 'name', p.full_name, 'photo_url', p.photo_url
+                'person_id', p.id, 'name', p.full_name, 'photo_url', p.photo_url,
+                'age', COALESCE(EXTRACT(YEAR FROM AGE(p.birth_date))::int,
+                                EXTRACT(YEAR FROM CURRENT_DATE)::int - p.birth_year)
               ) ORDER BY p.full_name) AS list,
               COUNT(*)::int AS cnt
        FROM   home_members hm
