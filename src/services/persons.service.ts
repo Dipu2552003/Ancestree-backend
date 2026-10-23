@@ -288,7 +288,7 @@ export async function generateInviteToken(id: string, userId: string, familyId: 
     { action: 'person.invite', actorId: userId, familyId },
     op => captureAndUpdate(op, 'person',
       { sql: 'id = $1', params: [id] },
-      { sql: `invite_token = $1, node_state = 'invited', invite_sent_at = NOW(), updated_at = NOW()`, params: [token] },
+      { sql: `invite_token = $1, invited_by = $2, node_state = 'invited', invite_sent_at = NOW(), updated_at = NOW()`, params: [token, userId] },
     ),
   )
 

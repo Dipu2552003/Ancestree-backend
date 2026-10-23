@@ -152,10 +152,12 @@ export async function claimByToken(token: string, userId: string) {
 }
 
 export async function lookupToken(token: string) {
-  // Inviter = the user who originally created the proxy node (persons.created_by).
-  // We hop through users.person_id to surface their own node's full_name +
+  // Inviter = the user who sent this invite (persons.invited_by), falling back to
+  // the node's creator for invites issued before invited_by existed. We hop
+  // through users.person_id to surface their own node's full_name +
   // father/village/city, so the invitee sees a real person to recognise rather
-  // than an opaque family-name string.
+  // than an opaque family-name string; an inviter with no node of their own
+  // falls back to their account display name.
   const { rows: [person] } = await query<{
     full_name:               string
     node_state:              string
@@ -176,13 +178,13 @@ export async function lookupToken(token: string) {
     `SELECT p.full_name, p.node_state, p.primary_family_id, p.birth_year, p.photo_url,
             p.gotra, p.native_village, p.current_city,
             f.name AS family_name,
-            inv.full_name      AS inviter_full_name,
+            COALESCE(inv.full_name, u.display_name) AS inviter_full_name,
             inv.native_village AS inviter_native_village,
             inv.current_city   AS inviter_current_city,
             inv_father.full_name AS inviter_father_name
      FROM persons p
      JOIN families f ON f.id = p.primary_family_id
-     LEFT JOIN users   u   ON u.id = p.created_by
+     LEFT JOIN users   u   ON u.id = COALESCE(p.invited_by, p.created_by)
      LEFT JOIN persons inv ON inv.id = u.person_id AND inv.deleted_at IS NULL
      LEFT JOIN LATERAL (
        SELECT fp.full_name
