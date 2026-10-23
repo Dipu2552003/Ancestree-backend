@@ -37,6 +37,9 @@ export async function resolveCallerScope(
   return { kind: 'public' }
 }
 
+// Escape LIKE wildcards so a typed "%" or "_" matches literally.
+const escapeLike = (s: string) => s.replace(/[\\%_]/g, '\\$&')
+
 // Resolves each person's father name (prefers a male PARENT_OF source) so search
 // results can disambiguate same-named people. Shared by every search variant.
 const FATHER_SUBQUERY = `
@@ -122,7 +125,7 @@ export async function searchPersons(
                            ''
 
   // Family-type boundary — the security-relevant filter. $1=term%, $2=term, $3=familyId.
-  const params: (string | null)[] = [`${term}%`, term, familyId]
+  const params: (string | null)[] = [`${escapeLike(term)}%`, term, familyId]
   let boundary: string
   if (caller.kind === 'community') {
     boundary = `AND p.community_id = $4 ${familyClause}`
@@ -151,6 +154,15 @@ export async function searchPersons(
     refine.push(`AND p.birth_year IS NOT NULL AND p.birth_year >= $${params.length}`)
   }
 
+  // Match the start of ANY word in the name ("Ra" → "Priya Rathi"), not just the
+  // first — community members mostly share a surname, so first-word-only
+  // matching missed most people.
+  params.push(`% ${escapeLike(term)}%`)
+  const wordPrefix = `$${params.length}`
+
+  // Ranking: match quality first, own cluster only as a tie-breaker. Ranking
+  // own-cluster-first meant a common name (or the shared surname) filled every
+  // slot from your own tree, hiding the community's independent clusters.
   const { rows } = await query(
     `SELECT p.id, p.full_name, p.birth_year, p.node_state, p.photo_url,
             p.native_village, p.current_city,
@@ -163,13 +175,16 @@ export async function searchPersons(
      WHERE  p.deleted_at IS NULL
        ${boundary}
        ${refine.join('\n       ')}
-       AND  (p.full_name ILIKE $1 OR similarity(p.full_name, $2) > 0.2)
+       AND  (p.full_name ILIKE $1 OR p.full_name ILIKE ${wordPrefix} OR similarity(p.full_name, $2) > 0.2)
      ORDER  BY
-       (p.primary_family_id = $3) DESC,
-       CASE WHEN lower(p.full_name) LIKE lower($1) THEN 0 ELSE 1 END,
+       CASE WHEN lower(p.full_name) = lower($2)   THEN 0
+            WHEN p.full_name ILIKE $1             THEN 1
+            WHEN p.full_name ILIKE ${wordPrefix}  THEN 2
+            ELSE 3 END,
        similarity(p.full_name, $2) DESC,
+       (p.primary_family_id = $3) DESC,
        length(p.full_name)
-     LIMIT  15`,
+     LIMIT  25`,
     params,
   )
 
