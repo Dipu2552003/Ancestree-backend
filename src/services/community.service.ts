@@ -638,11 +638,14 @@ export async function communitySignup(slug: string, input: CommunitySignupInput)
     const { rows: [person] } = await tx.query<Snapshot & { id: string }>(
       `INSERT INTO persons
          (person_code, primary_family_id, full_name, node_state, claimed_by, created_by,
-          visibility, community_id, gotra, native_village, current_city, photo_url)
-       VALUES ($1, $2, $3, 'claimed', $4, $4, 'community', $5, $6, $7, $8, $9) RETURNING *`,
+          visibility, community_id, gotra, native_village, current_city, photo_url,
+          birth_date, birth_year)
+       VALUES ($1, $2, $3, 'claimed', $4, $4, 'community', $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
       [personCode, family.id, input.display_name, user.id, community.id,
        input.gotra ?? null, input.native_village ?? null,
-       input.current_city ?? null, input.photo_url || null],
+       input.current_city ?? null, input.photo_url || null,
+       // birth_year mirrors the date so age/year displays work without parsing it.
+       input.birth_date ?? null, input.birth_date ? Number(input.birth_date.slice(0, 4)) : null],
     )
     await auditCreate(op, 'person', person)
 

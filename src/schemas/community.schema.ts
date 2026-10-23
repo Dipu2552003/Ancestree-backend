@@ -29,6 +29,16 @@ export const communitySignupSchema = z.object({
   native_village: z.string().max(120).optional(),
   current_city:   z.string().max(120).optional(),
   photo_url:      z.string().optional(), // base64 data URL or http(s) URL
+  // Optional date of birth, YYYY-MM-DD (what <input type="date"> sends). Must
+  // be a real calendar date, not in the future.
+  birth_date: z.string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Date of birth must be YYYY-MM-DD')
+    .refine(s => {
+      const d = new Date(`${s}T00:00:00Z`)
+      return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s)
+        && d.getUTCFullYear() >= 1900 && d.getTime() <= Date.now()
+    }, 'Enter a valid date of birth')
+    .optional(),
 })
 
 export const sendSignupCodeSchema = z.object({
