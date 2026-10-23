@@ -934,16 +934,19 @@ export async function listCommunityFamilies(slug: string, requesterId: string) {
   const community = await getBySlug(slug)
   await assertAdmin(community.id, requesterId)
 
+  // Counts are per-family subqueries, not joins: joining persons AND
+  // family_members multiplies rows (persons × members per family) before the
+  // DISTINCT counts collapse them, which got very slow as trees grew.
   const { rows } = await query(
     `SELECT f.id, f.name, f.name_prefix, f.created_at,
-            COUNT(DISTINCT p.id)::int       AS person_count,
-            COUNT(DISTINCT fm.user_id)::int AS member_count,
+            (SELECT COUNT(*) FROM persons p
+             WHERE p.primary_family_id = f.id AND p.deleted_at IS NULL)::int AS person_count,
+            (SELECT COUNT(*) FROM family_members fm
+             WHERE fm.family_id = f.id)::int                                 AS member_count,
             rep.person_id AS view_person_id,
             rep.full_name AS view_person_name,
             COALESCE(heads.list, '[]'::jsonb) AS heads
      FROM   families f
-     LEFT   JOIN persons p         ON p.primary_family_id = f.id AND p.deleted_at IS NULL
-     LEFT   JOIN family_members fm ON fm.family_id = f.id
      -- A representative person to open when the admin clicks the family: prefer a
      -- claimed (owned) node, then the family creator's, then anyone — so the click
      -- always lands somewhere real in that tree.
@@ -973,7 +976,6 @@ export async function listCommunityFamilies(slug: string, requesterId: string) {
        JOIN persons hp ON hp.id = h.family_head_id
      ) heads ON true
      WHERE  f.community_id = $1 AND f.deleted_at IS NULL
-     GROUP  BY f.id, rep.person_id, rep.full_name, heads.list
      ORDER  BY f.created_at DESC`,
     [community.id],
   )
@@ -1394,41 +1396,44 @@ export async function getCommunityHealth(slug: string, requesterId: string) {
   const community = await getBySlug(slug)
   await assertAdmin(community.id, requesterId)
 
-  // Accounts that own more than one active node in this community.
-  const { rows: duplicateOwners } = await query(
-    `SELECT p.claimed_by AS user_id, u.display_name, u.email,
-            COUNT(*)::int AS node_count,
-            array_agg(p.full_name ORDER BY p.created_at) AS node_names,
-            array_agg(p.id::text ORDER BY p.created_at) AS node_ids
-     FROM   persons p
-     JOIN   users u ON u.id = p.claimed_by
-     WHERE  p.community_id = $1 AND p.claimed_by IS NOT NULL AND p.deleted_at IS NULL
-     GROUP  BY p.claimed_by, u.display_name, u.email
-     HAVING COUNT(*) > 1
-     ORDER  BY COUNT(*) DESC`,
-    [community.id],
-  )
+  // The three checks are independent — run them concurrently.
+  const [{ rows: duplicateOwners }, { rows: duplicateLinks }, { rows: [idx] }] = await Promise.all([
+    // Accounts that own more than one active node in this community.
+    query(
+      `SELECT p.claimed_by AS user_id, u.display_name, u.email,
+              COUNT(*)::int AS node_count,
+              array_agg(p.full_name ORDER BY p.created_at) AS node_names,
+              array_agg(p.id::text ORDER BY p.created_at) AS node_ids
+       FROM   persons p
+       JOIN   users u ON u.id = p.claimed_by
+       WHERE  p.community_id = $1 AND p.claimed_by IS NOT NULL AND p.deleted_at IS NULL
+       GROUP  BY p.claimed_by, u.display_name, u.email
+       HAVING COUNT(*) > 1
+       ORDER  BY COUNT(*) DESC`,
+      [community.id],
+    ),
 
-  // Nodes in this community pointed at by more than one account.
-  const { rows: duplicateLinks } = await query(
-    `SELECT u.person_id, p.full_name,
-            COUNT(*)::int AS user_count,
-            array_agg(u.email) AS emails
-     FROM   users u
-     JOIN   persons p ON p.id = u.person_id
-     WHERE  p.community_id = $1
-     GROUP  BY u.person_id, p.full_name
-     HAVING COUNT(*) > 1
-     ORDER  BY COUNT(*) DESC`,
-    [community.id],
-  )
+    // Nodes in this community pointed at by more than one account.
+    query(
+      `SELECT u.person_id, p.full_name,
+              COUNT(*)::int AS user_count,
+              array_agg(u.email) AS emails
+       FROM   users u
+       JOIN   persons p ON p.id = u.person_id
+       WHERE  p.community_id = $1
+       GROUP  BY u.person_id, p.full_name
+       HAVING COUNT(*) > 1
+       ORDER  BY COUNT(*) DESC`,
+      [community.id],
+    ),
 
-  // Are the uniqueness indexes actually in place?
-  const { rows: [idx] } = await query<{ claimed_by_idx: boolean; person_id_idx: boolean }>(
-    `SELECT
-       EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'uq_persons_claimed_by') AS claimed_by_idx,
-       EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'uq_users_person_id')    AS person_id_idx`,
-  )
+    // Are the uniqueness indexes actually in place?
+    query<{ claimed_by_idx: boolean; person_id_idx: boolean }>(
+      `SELECT
+         EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'uq_persons_claimed_by') AS claimed_by_idx,
+         EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'uq_users_person_id')    AS person_id_idx`,
+    ),
+  ])
 
   const ownershipConstraintActive = !!idx?.claimed_by_idx && !!idx?.person_id_idx
 
